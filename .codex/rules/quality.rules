@@ -1,0 +1,22 @@
+prefix_rule(
+    pattern=["cargo", "test"],
+    decision="allow",
+    justification="signalpane の品質確認テスト",
+    match=["cargo test"],
+)
+
+prefix_rule(
+    pattern=["cargo", "fmt", "--check"],
+    decision="allow",
+    justification="signalpane の Rust format 確認",
+    match=["cargo fmt --check"],
+    not_match=["cargo fmt"],
+)
+
+prefix_rule(
+    pattern=["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
+    decision="allow",
+    justification="signalpane の Rust lint 確認",
+    match=["cargo clippy --all-targets -- -D warnings"],
+    not_match=["cargo clippy --fix"],
+)
