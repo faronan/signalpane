@@ -1,0 +1,30 @@
+{
+  "ok": true,
+  "messages": [
+    {
+      "ts": "1779757323.000100",
+      "user": "U999",
+      "text": "hello <@U123> can you check this?"
+    },
+    {
+      "ts": "1779757324.000100",
+      "user": "U999",
+      "text": "heads up <!subteam^S123|devs>"
+    },
+    {
+      "ts": "1779757325.000100",
+      "user": "U999",
+      "text": "<!here> deploy started"
+    },
+    {
+      "ts": "1779757326.000100",
+      "user": "U888",
+      "text": "second ping for <@U123>"
+    },
+    {
+      "ts": "1779757327.000100",
+      "user": "U777",
+      "text": "latest channel-only update"
+    }
+  ]
+}
