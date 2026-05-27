@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeZone, Utc};
 use reqwest::{
@@ -12,20 +14,42 @@ use super::{CollectOutcome, EventDraft};
 const SOURCE: &str = "slack";
 const AUTH_TEST_URL: &str = "https://slack.com/api/auth.test";
 const HISTORY_URL: &str = "https://slack.com/api/conversations.history";
+const API_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct SlackCollector {
     client: Client,
     token: String,
     user_id: Option<String>,
+    auth_test_url: String,
+    history_url: String,
 }
 
 impl SlackCollector {
     pub fn new(token: String, user_id: Option<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: build_http_client(API_TIMEOUT),
             token,
             user_id,
+            auth_test_url: AUTH_TEST_URL.to_string(),
+            history_url: HISTORY_URL.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        token: String,
+        user_id: Option<String>,
+        auth_test_url: String,
+        history_url: String,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            client: build_http_client(timeout),
+            token,
+            user_id,
+            auth_test_url,
+            history_url,
         }
     }
 
@@ -41,7 +65,7 @@ impl SlackCollector {
         };
         let mut request = self
             .client
-            .get(HISTORY_URL)
+            .get(&self.history_url)
             .headers(auth_headers(&self.token)?)
             .query(&[("channel", channel_id), ("limit", "100")]);
         if let Some(oldest) = oldest {
@@ -84,7 +108,7 @@ impl SlackCollector {
     fn resolve_user_id(&self) -> Result<String> {
         let response = self
             .client
-            .get(AUTH_TEST_URL)
+            .get(&self.auth_test_url)
             .headers(auth_headers(&self.token)?)
             .send()?;
         if !response.status().is_success() {
@@ -100,6 +124,13 @@ impl SlackCollector {
         auth.user_id
             .context("Slack auth.test did not return user_id")
     }
+}
+
+fn build_http_client(timeout: Duration) -> Client {
+    Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("failed to build Slack HTTP client")
 }
 
 fn auth_headers(token: &str) -> Result<HeaderMap> {
@@ -204,6 +235,15 @@ struct SlackAuthResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
+    use reqwest::header::{HeaderName, HeaderValue};
+
     use super::*;
 
     #[test]
@@ -232,5 +272,56 @@ mod tests {
             latest_message_ts(&history.messages),
             Some("1779757327.000100".to_string())
         );
+    }
+
+    #[test]
+    fn parses_retry_after_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("retry-after"),
+            HeaderValue::from_static("42"),
+        );
+
+        let before = Utc::now() + chrono::Duration::seconds(41);
+        let poll_after = parse_retry_after(&headers).expect("retry-after");
+        let after = Utc::now() + chrono::Duration::seconds(43);
+
+        assert!(poll_after >= before);
+        assert!(poll_after <= after);
+    }
+
+    #[test]
+    fn client_times_out_slow_history_requests() {
+        let history_url = spawn_slow_http_server(Duration::from_millis(200));
+        let collector = SlackCollector::new_for_test(
+            "xoxp-test".to_string(),
+            Some("U123".to_string()),
+            "http://127.0.0.1:1/auth.test".to_string(),
+            history_url,
+            Duration::from_millis(30),
+        );
+
+        let err = collector
+            .collect_channel(1, "C123", None)
+            .expect_err("slow server should time out");
+        let reqwest_err = err
+            .downcast_ref::<reqwest::Error>()
+            .expect("reqwest timeout error");
+
+        assert!(reqwest_err.is_timeout(), "unexpected error: {err:#}");
+    }
+
+    fn spawn_slow_http_server(delay: Duration) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0; 1024];
+                let _ = stream.read(&mut buffer);
+                thread::sleep(delay);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            }
+        });
+        format!("http://{addr}/history")
     }
 }

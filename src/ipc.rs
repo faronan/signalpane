@@ -161,4 +161,44 @@ mod tests {
         let changed = handle_request(&db_path, IpcRequest::MarkRead { id: event_id });
         assert_eq!(changed, IpcResponse::MarkRead { changed: true });
     }
+
+    #[test]
+    fn exposes_source_health_in_status_and_sources() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("signalpane.sqlite3");
+        let store = Store::open(&db_path).expect("store");
+        store
+            .upsert_account("github", "GitHub", "default", true, &serde_json::json!({}))
+            .expect("account");
+        store
+            .record_cursor_failure(
+                "github",
+                "notifications",
+                "GitHub collector timed out",
+                1,
+                Some(Utc.with_ymd_and_hms(2026, 5, 26, 1, 3, 3).single().unwrap()),
+                &serde_json::json!({}),
+            )
+            .expect("failure metadata");
+
+        let status = handle_request(&db_path, IpcRequest::Status);
+        let IpcResponse::Status { status } = status else {
+            panic!("unexpected status response");
+        };
+        assert_eq!(
+            status.sources[0].last_error.as_deref(),
+            Some("GitHub collector timed out")
+        );
+        assert_eq!(status.sources[0].consecutive_failures, 1);
+
+        let sources = handle_request(&db_path, IpcRequest::Sources);
+        let IpcResponse::Sources { sources } = sources else {
+            panic!("unexpected sources response");
+        };
+        assert_eq!(
+            sources[0].last_error.as_deref(),
+            Some("GitHub collector timed out")
+        );
+        assert_eq!(sources[0].consecutive_failures, 1);
+    }
 }
