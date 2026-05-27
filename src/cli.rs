@@ -6,6 +6,7 @@ use crate::{
     config::{AppPaths, Config, Secrets},
     daemon,
     ipc::IpcClient,
+    launch_agent::{self, LaunchAgentStatus},
     tui,
 };
 
@@ -32,6 +33,17 @@ enum Command {
     MarkRead {
         id: i64,
     },
+    LaunchAgent {
+        #[command(subcommand)]
+        command: LaunchAgentCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LaunchAgentCommand {
+    Install,
+    Uninstall,
+    Status,
 }
 
 pub fn run() -> Result<()> {
@@ -97,7 +109,22 @@ pub fn run() -> Result<()> {
             println!("changed={changed}");
             Ok(())
         }
+        Command::LaunchAgent { command } => {
+            let status = match command {
+                LaunchAgentCommand::Install => launch_agent::install(&paths)?,
+                LaunchAgentCommand::Uninstall => launch_agent::uninstall()?,
+                LaunchAgentCommand::Status => launch_agent::status()?,
+            };
+            print_launch_agent_status(&status);
+            Ok(())
+        }
     }
+}
+
+fn print_launch_agent_status(status: &LaunchAgentStatus) {
+    println!("label={}", status.label);
+    println!("plist={}", status.plist_path.display());
+    println!("loaded={}", status.loaded);
 }
 
 fn format_dt(value: Option<&DateTime<Utc>>) -> String {

@@ -24,11 +24,14 @@ fixture-tested collectors, and a thin Ratatui TUI.
 - MVP execution is foreground only: `signalpane daemon --foreground`,
   `signalpane tui`, `signalpane status`, `signalpane sources`, and
   `signalpane mark-read <id>`.
-- Do not add LaunchAgent, LaunchDaemon, root-level install, Ghostty notification,
-  OAuth, Keychain, or Notion support unless the task explicitly asks for that
-  follow-up scope.
-- Do not create files under `~/Library/LaunchAgents`, `/Library/LaunchDaemons`,
-  or any root-owned location for MVP work.
+- LaunchAgent support is limited to the user-level
+  `signalpane launch-agent install|uninstall|status` commands and
+  `~/Library/LaunchAgents/com.faronan.signalpane.plist`.
+- Do not add LaunchDaemon, root-level install, Ghostty notification, OAuth,
+  Keychain, or Notion support unless the task explicitly asks for that follow-up
+  scope.
+- Do not create files under `/Library/LaunchDaemons` or any root-owned location
+  for MVP work.
 
 ## Config, State, and Secrets
 

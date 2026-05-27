@@ -10,6 +10,9 @@ signalpane tui
 signalpane status
 signalpane sources
 signalpane mark-read <id>
+signalpane launch-agent install
+signalpane launch-agent uninstall
+signalpane launch-agent status
 ```
 
 ## Install on Apple Silicon macOS
@@ -57,6 +60,45 @@ xattr -dr com.apple.quarantine "${HOME}/.local/bin/signalpane"
 To update, repeat the download, checksum, extract, and `install` steps with a
 newer release tag. Updating only replaces `~/.local/bin/signalpane`; it does not
 modify your config, secrets, database, socket, or logs.
+
+## macOS user LaunchAgent
+
+After installing the binary at its final path, register the foreground daemon as
+a macOS user LaunchAgent:
+
+```sh
+signalpane launch-agent install
+signalpane launch-agent status
+signalpane launch-agent uninstall
+```
+
+The LaunchAgent is limited to
+`~/Library/LaunchAgents/com.faronan.signalpane.plist` and the user launchd
+domain. It does not use `sudo`, `/Library/LaunchDaemons`, root-owned paths, or
+system-wide services. The generated plist runs the existing daemon command:
+
+```sh
+signalpane daemon --foreground
+```
+
+The plist writes stdout and stderr to
+`~/.local/state/signalpane/logs/daemon.log`. Config, state, database, socket, and
+collector logs continue to use the runtime locations documented below.
+
+Secrets are not written to the plist. If the daemon needs GitHub or Slack
+credentials when launched by launchd, provide them through the user launchd
+environment before installing or restarting the LaunchAgent:
+
+```sh
+launchctl setenv SIGNALPANE_GITHUB_TOKEN "<github-token>"
+launchctl setenv SIGNALPANE_SLACK_USER_TOKEN "<slack-user-token>"
+launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
+```
+
+Values set with `launchctl setenv` are scoped to the current user launchd
+session and are not persisted across logout or reboot. Set them again after
+login before installing or restarting the LaunchAgent when collectors need
+credentials.
 
 ## Runtime locations
 
