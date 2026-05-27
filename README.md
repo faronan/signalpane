@@ -205,3 +205,14 @@ Pushing a `vX.Y.Z` tag creates a published GitHub Release with these assets:
 
 Release binaries are intended for Apple Silicon Macs and are not currently
 notarized or packaged as a macOS app bundle.
+
+Before publishing a GitHub Release, the release workflow smokes the generated
+tarball on the macOS Apple Silicon runner. It extracts the artifact, verifies
+that the included `signalpane` binary is executable, checks `signalpane --help`
+and `signalpane --version`, and runs `signalpane launch-agent status` with
+isolated config and state paths.
+
+This smoke test confirms that the release artifact is minimally executable as a
+distribution binary. It does not cover local installation paths, shell `PATH`
+setup, macOS quarantine handling, daemon IPC, live GitHub or Slack collectors,
+tokens, network access, Homebrew, self-update, SLSA, or SBOM guarantees.

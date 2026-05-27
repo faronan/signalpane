@@ -62,6 +62,45 @@ jobs:
             shasum -a 256 "${ASSET_BASE}.tar.gz" > SHA256SUMS
           )
 
+      - name: Smoke release artifact
+        run: |
+          set -euo pipefail
+
+          smoke_dir="$(mktemp -d)"
+          smoke_home="$(mktemp -d)"
+          smoke_config="$(mktemp -d)"
+          smoke_state="$(mktemp -d)"
+
+          tar -xzf "dist/${ASSET_BASE}.tar.gz" -C "${smoke_dir}"
+
+          binary="${smoke_dir}/signalpane"
+          test -f "${binary}"
+          test -x "${binary}"
+
+          "${binary}" --help
+
+          version_output="$("${binary}" --version)"
+          expected_version="signalpane ${VERSION}"
+          if [[ "${version_output}" != "${expected_version}" ]]; then
+            echo "::error::expected ${expected_version}, got ${version_output}"
+            exit 1
+          fi
+
+          status_output="$(
+            HOME="${smoke_home}" \
+            XDG_CONFIG_HOME="${smoke_config}" \
+            XDG_STATE_HOME="${smoke_state}" \
+            SIGNALPANE_GITHUB_TOKEN= \
+            SIGNALPANE_SLACK_USER_TOKEN= \
+            SIGNALPANE_SLACK_USER_ID= \
+            "${binary}" launch-agent status
+          )"
+          echo "${status_output}"
+
+          grep -Fqx "label=com.faronan.signalpane" <<< "${status_output}"
+          grep -Fqx "plist=${smoke_home}/Library/LaunchAgents/com.faronan.signalpane.plist" <<< "${status_output}"
+          grep -Eq '^loaded=(true|false)$' <<< "${status_output}"
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
