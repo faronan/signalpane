@@ -1,3 +1,5 @@
+use std::time::Duration as StdDuration;
+
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use reqwest::{
@@ -15,6 +17,7 @@ const NOTIFICATIONS_URL: &str =
 const ACCEPT_VALUE: &str = "application/vnd.github+json";
 const USER_AGENT_VALUE: &str = "signalpane/0.1";
 const REASONS: &[&str] = &["mention", "team_mention", "review_requested"];
+const API_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct GithubCollector {
@@ -25,7 +28,7 @@ pub struct GithubCollector {
 impl GithubCollector {
     pub fn new(token: String) -> Self {
         Self {
-            client: Client::new(),
+            client: build_http_client(API_TIMEOUT),
             token,
         }
     }
@@ -74,6 +77,13 @@ impl GithubCollector {
             poll_after,
         })
     }
+}
+
+fn build_http_client(timeout: StdDuration) -> Client {
+    Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("failed to build GitHub HTTP client")
 }
 
 fn github_poll_after(headers: &HeaderMap) -> Option<DateTime<Utc>> {
@@ -173,6 +183,8 @@ impl serde::Serialize for GithubThread {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::header::{HeaderName, HeaderValue};
+
     use super::*;
 
     #[test]
@@ -199,5 +211,21 @@ mod tests {
                 .iter()
                 .any(|event| event.reason.as_deref() == Some("review_requested"))
         );
+    }
+
+    #[test]
+    fn parses_github_poll_interval_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-poll-interval"),
+            HeaderValue::from_static("42"),
+        );
+
+        let before = Utc::now() + Duration::seconds(41);
+        let poll_after = github_poll_after(&headers).expect("poll interval");
+        let after = Utc::now() + Duration::seconds(43);
+
+        assert!(poll_after >= before);
+        assert!(poll_after <= after);
     }
 }

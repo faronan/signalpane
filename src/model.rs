@@ -33,8 +33,13 @@ pub struct SourceStatus {
     pub label: String,
     pub enabled: bool,
     pub unread_count: i64,
+    pub cursor_key: Option<String>,
     pub last_cursor: Option<String>,
     pub poll_after: Option<DateTime<Utc>>,
+    pub last_success_at: Option<DateTime<Utc>>,
+    pub last_error_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub consecutive_failures: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
