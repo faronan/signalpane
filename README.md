@@ -72,6 +72,66 @@ Secrets are read from environment variables only:
 
 Do not store tokens in this repository or in `config.toml`.
 
+## Setup config
+
+The MVP reads config from `~/.config/signalpane/config.toml`. The daemon creates
+the config directory if needed, but it does not generate a config file yet.
+Create one manually after installing the binary:
+
+```sh
+mkdir -p ~/.config/signalpane
+printf '%s\n' \
+  '[github]' \
+  'enabled = true' \
+  'poll_interval_seconds = 60' \
+  '' \
+  '[slack]' \
+  'enabled = true' \
+  'channels = ["C0123456789"]' \
+  'poll_interval_seconds = 60' \
+  > ~/.config/signalpane/config.toml
+```
+
+Replace `C0123456789` with the Slack channel IDs that signalpane should poll.
+Config changes are read when `signalpane daemon --foreground` starts, so restart
+the foreground daemon after editing this file.
+
+Future setup commands are planned, but not part of the current MVP:
+
+```sh
+signalpane config init
+signalpane config set slack.channels C0123456789
+signalpane config list
+```
+
+## Foreground daemon diagnostics
+
+`signalpane status` keeps the first line stable:
+
+```sh
+unread=0 total=0
+```
+
+It also prints the daemon log path and per-source diagnostics. `signalpane
+sources` keeps the existing source, label, enabled, unread, and cursor fields,
+then appends:
+
+- `poll_after`: next time the daemon should poll that source or channel.
+- `last_success`: last successful collector run for the source.
+- `last_error_at`: time of the most recent collector error, or `-`.
+- `last_error`: most recent collector error, or `-`.
+- `failures`: consecutive collector failures for the latest cursor.
+
+Collector errors are written to the SQLite cursor metadata and to
+`~/.local/state/signalpane/logs/daemon.log`. A failing source or Slack channel is
+backed off independently and does not stop other collectors in the foreground
+daemon.
+
+API requests use a fixed 10 second timeout. Successful polls prefer source API
+retry hints first (`X-Poll-Interval` for GitHub and `Retry-After` for Slack),
+then fall back to `poll_interval_seconds` from config. Collector failures use an
+exponential backoff starting at 60 seconds and capped at 15 minutes.
+
 ## Example config
 
 ```toml
