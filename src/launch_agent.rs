@@ -93,6 +93,7 @@ mod platform {
     use std::{
         ffi::OsStr,
         fs, io,
+        path::Path,
         process::{Command, Output},
     };
 
@@ -117,14 +118,11 @@ mod platform {
         fs::write(&plist_path, plist)
             .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
+        let launchctl = SystemLaunchctl;
         let service_target = service_target()?;
-        let _ = run_launchctl([OsStr::new("bootout"), OsStr::new(service_target.as_str())]);
+        bootout_if_loaded(&launchctl, &service_target)?;
         let domain = gui_domain()?;
-        let output = run_launchctl([
-            OsStr::new("bootstrap"),
-            OsStr::new(domain.as_str()),
-            plist_path.as_os_str(),
-        ])?;
+        let output = launchctl.bootstrap(&domain, &plist_path)?;
         ensure_success(output, "launchctl bootstrap")?;
 
         Ok(LaunchAgentStatus {
@@ -137,7 +135,16 @@ mod platform {
     pub fn uninstall() -> Result<LaunchAgentStatus> {
         let plist_path = launch_agent_path_from_env()?;
         let service_target = service_target()?;
-        let _ = run_launchctl([OsStr::new("bootout"), OsStr::new(service_target.as_str())]);
+        let launchctl = SystemLaunchctl;
+        uninstall_with(plist_path, &service_target, &launchctl)
+    }
+
+    fn uninstall_with(
+        plist_path: std::path::PathBuf,
+        service_target: &str,
+        launchctl: &impl Launchctl,
+    ) -> Result<LaunchAgentStatus> {
+        bootout_if_loaded(launchctl, service_target)?;
 
         match fs::remove_file(&plist_path) {
             Ok(()) => {}
@@ -160,14 +167,69 @@ mod platform {
         Ok(LaunchAgentStatus {
             label: LABEL,
             plist_path,
-            loaded: is_loaded()?,
+            loaded: is_loaded(&SystemLaunchctl)?,
         })
     }
 
-    fn is_loaded() -> Result<bool> {
+    trait Launchctl {
+        fn print(&self, service_target: &str) -> Result<Output>;
+        fn bootout(&self, service_target: &str) -> Result<Output>;
+        fn bootstrap(&self, domain: &str, plist_path: &Path) -> Result<Output>;
+    }
+
+    struct SystemLaunchctl;
+
+    impl Launchctl for SystemLaunchctl {
+        fn print(&self, service_target: &str) -> Result<Output> {
+            run_launchctl([OsStr::new("print"), OsStr::new(service_target)])
+        }
+
+        fn bootout(&self, service_target: &str) -> Result<Output> {
+            run_launchctl([OsStr::new("bootout"), OsStr::new(service_target)])
+        }
+
+        fn bootstrap(&self, domain: &str, plist_path: &Path) -> Result<Output> {
+            run_launchctl([
+                OsStr::new("bootstrap"),
+                OsStr::new(domain),
+                plist_path.as_os_str(),
+            ])
+        }
+    }
+
+    fn is_loaded(launchctl: &impl Launchctl) -> Result<bool> {
         let service_target = service_target()?;
-        let output = run_launchctl([OsStr::new("print"), OsStr::new(service_target.as_str())])?;
-        Ok(output.status.success())
+        is_loaded_with(launchctl, &service_target)
+    }
+
+    fn is_loaded_with(launchctl: &impl Launchctl, service_target: &str) -> Result<bool> {
+        let output = launchctl.print(service_target)?;
+        print_output_loaded(output)
+    }
+
+    fn print_output_loaded(output: Output) -> Result<bool> {
+        if output.status.success() {
+            return Ok(true);
+        }
+        if is_service_not_found(&output) {
+            return Ok(false);
+        }
+        ensure_success(output, "launchctl print").map(|_| true)
+    }
+
+    fn bootout_if_loaded(launchctl: &impl Launchctl, service_target: &str) -> Result<()> {
+        if !is_loaded_with(launchctl, service_target)? {
+            return Ok(());
+        }
+        let output = launchctl.bootout(service_target)?;
+        ensure_bootout_success(output)
+    }
+
+    fn ensure_bootout_success(output: Output) -> Result<()> {
+        if output.status.success() || is_service_not_found(&output) {
+            return Ok(());
+        }
+        ensure_success(output, "launchctl bootout").map(|_| ())
     }
 
     fn gui_domain() -> Result<String> {
@@ -198,21 +260,122 @@ mod platform {
             .context("failed to run launchctl")
     }
 
+    fn is_service_not_found(output: &Output) -> bool {
+        output.status.code() == Some(113)
+            && launchctl_output_message(output).contains("Could not find service")
+    }
+
     fn ensure_success(output: Output, description: &str) -> Result<Output> {
         if output.status.success() {
             return Ok(output);
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let message = [stderr.trim(), stdout.trim()]
-            .into_iter()
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let message = launchctl_output_message(&output);
         if message.is_empty() {
             bail!("{description} failed with status {}", output.status);
         }
         bail!("{description} failed: {message}");
+    }
+
+    fn launchctl_output_message(output: &Output) -> String {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        [stderr.trim(), stdout.trim()]
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{
+            cell::RefCell,
+            fs,
+            os::unix::process::ExitStatusExt,
+            process::{ExitStatus, Output},
+        };
+
+        use tempfile::tempdir;
+
+        use super::*;
+
+        struct FakeLaunchctl {
+            print_output: RefCell<Option<Output>>,
+            bootout_output: RefCell<Option<Output>>,
+        }
+
+        impl Launchctl for FakeLaunchctl {
+            fn print(&self, _service_target: &str) -> Result<Output> {
+                Ok(self.print_output.borrow_mut().take().expect("print output"))
+            }
+
+            fn bootout(&self, _service_target: &str) -> Result<Output> {
+                Ok(self
+                    .bootout_output
+                    .borrow_mut()
+                    .take()
+                    .expect("bootout output"))
+            }
+
+            fn bootstrap(&self, _domain: &str, _plist_path: &std::path::Path) -> Result<Output> {
+                panic!("bootstrap should not be called")
+            }
+        }
+
+        #[test]
+        fn print_not_found_output_means_service_is_unloaded() {
+            let output = command_output(
+                113,
+                "",
+                "Bad request.\nCould not find service \"com.faronan.signalpane\" in domain for user gui: 501\n",
+            );
+
+            assert!(!print_output_loaded(output).expect("classify output"));
+        }
+
+        #[test]
+        fn bootout_non_not_found_failure_returns_error() {
+            let output = command_output(5, "", "Input/output error\n");
+
+            let err = ensure_bootout_success(output).expect_err("bootout should fail");
+
+            assert!(
+                err.to_string().contains("launchctl bootout failed"),
+                "unexpected error: {err:#}"
+            );
+        }
+
+        #[test]
+        fn uninstall_does_not_remove_plist_when_bootout_fails() {
+            let dir = tempdir().expect("tempdir");
+            let plist_path = dir.path().join("com.faronan.signalpane.plist");
+            fs::write(&plist_path, "plist").expect("write plist");
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(Some(command_output(0, "service = true\n", ""))),
+                bootout_output: RefCell::new(Some(command_output(5, "", "Input/output error\n"))),
+            };
+
+            let err = uninstall_with(
+                plist_path.clone(),
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+            )
+            .expect_err("uninstall should fail");
+
+            assert!(
+                err.to_string().contains("launchctl bootout failed"),
+                "unexpected error: {err:#}"
+            );
+            assert!(plist_path.exists());
+        }
+
+        fn command_output(code: i32, stdout: &str, stderr: &str) -> Output {
+            Output {
+                status: ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            }
+        }
     }
 }
 

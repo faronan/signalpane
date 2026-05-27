@@ -95,6 +95,11 @@ launchctl setenv SIGNALPANE_SLACK_USER_TOKEN "<slack-user-token>"
 launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
 ```
 
+Values set with `launchctl setenv` are scoped to the current user launchd
+session and are not persisted across logout or reboot. Set them again after
+login before installing or restarting the LaunchAgent when collectors need
+credentials.
+
 ## Runtime locations
 
 - Config: `~/.config/signalpane/config.toml`
