@@ -186,6 +186,10 @@ mod tests {
             panic!("unexpected status response");
         };
         assert_eq!(
+            status.sources[0].cursor_key.as_deref(),
+            Some("notifications")
+        );
+        assert_eq!(
             status.sources[0].last_error.as_deref(),
             Some("GitHub collector timed out")
         );
@@ -200,5 +204,59 @@ mod tests {
             Some("GitHub collector timed out")
         );
         assert_eq!(sources[0].consecutive_failures, 1);
+    }
+
+    #[test]
+    fn exposes_each_cursor_health_in_sources() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("signalpane.sqlite3");
+        let store = Store::open(&db_path).expect("store");
+        store
+            .upsert_account(
+                "slack",
+                "Slack",
+                "default",
+                true,
+                &serde_json::json!({ "channels": ["C1", "C2"] }),
+            )
+            .expect("account");
+        store
+            .record_cursor_failure(
+                "slack",
+                "channel:C1",
+                "Slack collector timed out",
+                1,
+                Some(Utc.with_ymd_and_hms(2026, 5, 26, 1, 3, 3).single().unwrap()),
+                &serde_json::json!({ "channel": "C1" }),
+            )
+            .expect("failure metadata");
+        store
+            .record_cursor_success(
+                "slack",
+                "channel:C2",
+                Some("1779757327.000100"),
+                Some(Utc.with_ymd_and_hms(2026, 5, 26, 1, 4, 3).single().unwrap()),
+                &serde_json::json!({ "channel": "C2" }),
+            )
+            .expect("success metadata");
+
+        let sources = handle_request(&db_path, IpcRequest::Sources);
+        let IpcResponse::Sources { sources } = sources else {
+            panic!("unexpected sources response");
+        };
+
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.cursor_key.as_deref() == Some("channel:C1")
+                    && source.last_error.as_deref() == Some("Slack collector timed out"))
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.cursor_key.as_deref() == Some("channel:C2")
+                    && source.last_cursor.as_deref() == Some("1779757327.000100"))
+        );
     }
 }

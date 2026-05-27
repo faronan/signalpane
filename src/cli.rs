@@ -57,11 +57,12 @@ pub fn run() -> Result<()> {
             println!("daemon_log={}", paths.daemon_log.display());
             for source in status.sources {
                 println!(
-                    "{}\t{}\tenabled={}\tunread={}\tpoll_after={}\tlast_success={}\tlast_error_at={}\tlast_error={}\tfailures={}",
+                    "{}\t{}\tenabled={}\tunread={}\tcursor_key={}\tpoll_after={}\tlast_success={}\tlast_error_at={}\tlast_error={}\tfailures={}",
                     source.source,
                     source.label,
                     source.enabled,
                     source.unread_count,
+                    format_optional_text(source.cursor_key.as_deref()),
                     format_dt(source.poll_after.as_ref()),
                     format_dt(source.last_success_at.as_ref()),
                     format_dt(source.last_error_at.as_ref()),
@@ -75,11 +76,12 @@ pub fn run() -> Result<()> {
             let sources = IpcClient::new(paths.socket_file).sources()?;
             for source in sources {
                 println!(
-                    "{}\t{}\tenabled={}\tunread={}\tcursor={}\tpoll_after={}\tlast_success={}\tlast_error_at={}\tlast_error={}\tfailures={}",
+                    "{}\t{}\tenabled={}\tunread={}\tcursor_key={}\tcursor={}\tpoll_after={}\tlast_success={}\tlast_error_at={}\tlast_error={}\tfailures={}",
                     source.source,
                     source.label,
                     source.enabled,
                     source.unread_count,
+                    format_optional_text(source.cursor_key.as_deref()),
                     format_optional_text(source.last_cursor.as_deref()),
                     format_dt(source.poll_after.as_ref()),
                     format_dt(source.last_success_at.as_ref()),

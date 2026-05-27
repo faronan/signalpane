@@ -312,48 +312,25 @@ impl Store {
 
     pub fn source_statuses(&self) -> Result<Vec<SourceStatus>> {
         let accounts = self.list_accounts()?;
-        accounts
-            .into_iter()
-            .map(|account| {
-                let unread_count = self.conn.query_row(
-                    "SELECT COUNT(*) FROM events WHERE account_id = ?1 AND read_at IS NULL",
-                    params![account.id],
-                    |row| row.get(0),
-                )?;
-                let cursor = self
-                    .conn
-                    .query_row(
-                        r#"
-                    SELECT cursor_value, poll_after, metadata_json
-                    FROM source_cursors
-                    WHERE source = ?1
-                    ORDER BY updated_at DESC
-                    LIMIT 1
-                    "#,
-                        params![account.source],
-                        stored_cursor_from_row,
-                    )
-                    .optional()?;
-                let health = cursor
-                    .as_ref()
-                    .map(|cursor| cursor_health(&cursor.metadata_json))
-                    .unwrap_or_default();
-                Ok(SourceStatus {
-                    source: account.source,
-                    label: account.label,
-                    enabled: account.enabled,
-                    unread_count,
-                    last_cursor: cursor
-                        .as_ref()
-                        .and_then(|cursor| cursor.cursor_value.clone()),
-                    poll_after: cursor.and_then(|cursor| cursor.poll_after),
-                    last_success_at: health.last_success_at,
-                    last_error_at: health.last_error_at,
-                    last_error: health.last_error,
-                    consecutive_failures: health.consecutive_failures,
-                })
-            })
-            .collect()
+        let mut statuses = Vec::new();
+        for account in accounts {
+            let unread_count = self.conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE account_id = ?1 AND read_at IS NULL",
+                params![account.id],
+                |row| row.get(0),
+            )?;
+            let cursors = self.read_cursors_for_source(&account.source)?;
+            if cursors.is_empty() {
+                statuses.push(source_status_from_cursor(&account, unread_count, None));
+            } else {
+                statuses.extend(
+                    cursors.into_iter().map(|cursor| {
+                        source_status_from_cursor(&account, unread_count, Some(cursor))
+                    }),
+                );
+            }
+        }
+        Ok(statuses)
     }
 
     fn read_cursor(&self, source: &str, cursor_key: &str) -> Result<Option<StoredCursor>> {
@@ -365,6 +342,32 @@ impl Store {
             )
             .optional()
             .context("failed to get source cursor")
+    }
+
+    fn read_cursors_for_source(&self, source: &str) -> Result<Vec<(String, StoredCursor)>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT cursor_key, cursor_value, poll_after, metadata_json
+            FROM source_cursors
+            WHERE source = ?1
+            ORDER BY cursor_key
+            "#,
+        )?;
+        let rows = stmt.query_map(params![source], |row| {
+            Ok((
+                row.get(0)?,
+                StoredCursor {
+                    cursor_value: row.get(1)?,
+                    poll_after: row
+                        .get::<_, Option<String>>(2)?
+                        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
+                        .map(|value| value.with_timezone(&Utc)),
+                    metadata_json: serde_json::from_str(&row.get::<_, String>(3)?)
+                        .unwrap_or_else(|_| Value::Object(Map::new())),
+                },
+            ))
+        })?;
+        collect_rows(rows).context("failed to list source cursors")
     }
 
     fn scalar_count(&self, sql: &str) -> Result<i64> {
@@ -420,6 +423,31 @@ fn source_cursor_from_stored(cursor: StoredCursor) -> SourceCursor {
     SourceCursor {
         cursor_value: cursor.cursor_value,
         poll_after: cursor.poll_after,
+        last_success_at: health.last_success_at,
+        last_error_at: health.last_error_at,
+        last_error: health.last_error,
+        consecutive_failures: health.consecutive_failures,
+    }
+}
+
+fn source_status_from_cursor(
+    account: &Account,
+    unread_count: i64,
+    cursor: Option<(String, StoredCursor)>,
+) -> SourceStatus {
+    let cursor_key = cursor.as_ref().map(|(cursor_key, _)| cursor_key.clone());
+    let stored_cursor = cursor.as_ref().map(|(_, cursor)| cursor);
+    let health = stored_cursor
+        .map(|cursor| cursor_health(&cursor.metadata_json))
+        .unwrap_or_default();
+    SourceStatus {
+        source: account.source.clone(),
+        label: account.label.clone(),
+        enabled: account.enabled,
+        unread_count,
+        cursor_key,
+        last_cursor: stored_cursor.and_then(|cursor| cursor.cursor_value.clone()),
+        poll_after: stored_cursor.and_then(|cursor| cursor.poll_after),
         last_success_at: health.last_success_at,
         last_error_at: health.last_error_at,
         last_error: health.last_error,
@@ -557,6 +585,7 @@ mod tests {
             .find(|status| status.source == "github")
             .expect("github status");
 
+        assert_eq!(github.cursor_key.as_deref(), Some("notifications"));
         assert_eq!(github.poll_after, Some(poll_after));
         assert_eq!(github.last_error.as_deref(), Some("request timed out"));
         assert_eq!(github.consecutive_failures, 2);
@@ -605,5 +634,80 @@ mod tests {
         assert_eq!(github.last_error_at, None);
         assert_eq!(github.consecutive_failures, 0);
         assert!(github.last_success_at.is_some());
+    }
+
+    #[test]
+    fn source_statuses_expose_each_cursor_health() {
+        let store = Store::open_in_memory().expect("store");
+        store
+            .upsert_account(
+                "slack",
+                "Slack",
+                "default",
+                true,
+                &serde_json::json!({ "channels": ["C1", "C2"] }),
+            )
+            .expect("account");
+        let failed_poll_after = Utc.with_ymd_and_hms(2026, 5, 26, 1, 3, 3).single().unwrap();
+        let success_poll_after = Utc.with_ymd_and_hms(2026, 5, 26, 1, 4, 3).single().unwrap();
+
+        store
+            .record_cursor_failure(
+                "slack",
+                "channel:C1",
+                "Slack conversations.history failed",
+                2,
+                Some(failed_poll_after),
+                &serde_json::json!({ "channel": "C1" }),
+            )
+            .expect("failure metadata");
+        store
+            .record_cursor_success(
+                "slack",
+                "channel:C2",
+                Some("1779757327.000100"),
+                Some(success_poll_after),
+                &serde_json::json!({ "channel": "C2" }),
+            )
+            .expect("success metadata");
+
+        let statuses = store.source_statuses().expect("statuses");
+
+        assert_eq!(statuses.len(), 2);
+        let c1 = statuses
+            .iter()
+            .find(|status| status.cursor_key.as_deref() == Some("channel:C1"))
+            .expect("C1 cursor status");
+        assert_eq!(
+            c1.last_error.as_deref(),
+            Some("Slack conversations.history failed")
+        );
+        assert_eq!(c1.consecutive_failures, 2);
+        assert_eq!(c1.poll_after, Some(failed_poll_after));
+
+        let c2 = statuses
+            .iter()
+            .find(|status| status.cursor_key.as_deref() == Some("channel:C2"))
+            .expect("C2 cursor status");
+        assert_eq!(c2.last_cursor.as_deref(), Some("1779757327.000100"));
+        assert_eq!(c2.last_error, None);
+        assert_eq!(c2.consecutive_failures, 0);
+        assert_eq!(c2.poll_after, Some(success_poll_after));
+    }
+
+    #[test]
+    fn source_statuses_include_sources_without_cursors() {
+        let store = Store::open_in_memory().expect("store");
+        store
+            .upsert_account("github", "GitHub", "default", true, &serde_json::json!({}))
+            .expect("account");
+
+        let statuses = store.source_statuses().expect("statuses");
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].source, "github");
+        assert_eq!(statuses[0].cursor_key, None);
+        assert_eq!(statuses[0].last_cursor, None);
+        assert_eq!(statuses[0].consecutive_failures, 0);
     }
 }

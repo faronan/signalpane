@@ -112,15 +112,17 @@ signalpane config list
 unread=0 total=0
 ```
 
-It also prints the daemon log path and per-source diagnostics. `signalpane
-sources` keeps the existing source, label, enabled, unread, and cursor fields,
-then appends:
+It also prints the daemon log path and per-source/cursor diagnostics. Sources
+with stored cursors are listed once per cursor, so Slack channels expose
+independent health rows. `signalpane sources` keeps the existing source, label,
+enabled, unread, and cursor fields, and adds:
 
+- `cursor_key`: cursor row being reported, for example `channel:C0123456789`.
 - `poll_after`: next time the daemon should poll that source or channel.
-- `last_success`: last successful collector run for the source.
+- `last_success`: last successful collector run for the cursor.
 - `last_error_at`: time of the most recent collector error, or `-`.
 - `last_error`: most recent collector error, or `-`.
-- `failures`: consecutive collector failures for the latest cursor.
+- `failures`: consecutive collector failures for the cursor.
 
 Collector errors are written to the SQLite cursor metadata and to
 `~/.local/state/signalpane/logs/daemon.log`. A failing source or Slack channel is
