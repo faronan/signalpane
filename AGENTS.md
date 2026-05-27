@@ -78,6 +78,24 @@ cargo test
 Project-local Codex policy in `.codex/rules/quality.rules` allows these checks
 without extra approval in this repository.
 
+GitHub Actions mirrors the local gate in `.github/workflows/ci.yml`. Branch
+pushes and pull requests must run `cargo test`, `cargo fmt --check`, and
+`cargo clippy --all-targets -- -D warnings`.
+
+## Release Workflow
+
+- `.github/workflows/release.yml` runs only for stable release tags matching
+  `vX.Y.Z`.
+- The release workflow repeats the cargo quality gate before packaging.
+- Binary releases target Apple Silicon Macs only:
+  `aarch64-apple-darwin`. Do not add Intel or universal macOS artifacts unless
+  the task explicitly asks for that scope.
+- Release assets are `signalpane-vX.Y.Z-aarch64-apple-darwin.tar.gz` and
+  `SHA256SUMS`, uploaded to a published GitHub Release.
+- The binary install/update flow uses `~/.local/bin/signalpane` and must not
+  write config, secrets, database, socket, read state, or logs outside the paths
+  documented in this file.
+
 ## Documentation
 
 - Keep `README.md` user-facing and concise: setup, runtime paths, commands, and
