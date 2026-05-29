@@ -2,75 +2,49 @@
 
 ## Repository Purpose
 
-`signalpane` is a local developer notification hub. The MVP is a Rust CLI
-application with a foreground daemon, SQLite store, Unix domain socket IPC,
-fixture-tested collectors, and a thin Ratatui TUI.
+`signalpane` はローカル開発者向けの通知 hub です。MVP は Rust CLI、foreground daemon、SQLite store、Unix domain socket IPC、fixture-tested collectors、薄い Ratatui TUI で構成します。
 
 ## Architecture Boundaries
 
-- Keep notification collection in the daemon/collector layer. The TUI must attach
-  to the daemon over local IPC and must not fetch GitHub, Slack, or Notion data
-  directly.
-- Keep persistent local data in SQLite through `src/store/`. Avoid writing cursor,
-  read state, delivery state, or event data outside the store abstraction.
-- Keep wire/data contracts in `src/model.rs`, `src/collectors/mod.rs`, and
-  `src/ipc.rs`. Prefer typed structs over ad hoc JSON handling outside collector
-  edges.
-- Keep source-specific API logic in `src/collectors/`. GitHub and Slack behavior
-  should remain independently testable with fixtures.
+- 通知収集は daemon / collector layer に閉じ込めます。TUI は local IPC で daemon に接続し、GitHub、Slack、Notion を直接 fetch しません。
+- 永続化する local data は `src/store/` 経由で SQLite に保存します。cursor、read state、delivery state、event data を store abstraction の外へ書かないでください。
+- wire/data contract は `src/model.rs`、`src/collectors/mod.rs`、`src/ipc.rs` に置きます。collector edge 以外では ad hoc JSON より typed struct を優先します。
+- source-specific API logic は `src/collectors/` に置きます。GitHub と Slack の挙動は fixture で独立に検証できる形を保ちます。
 
 ## Runtime Scope
 
-- MVP execution is foreground only: `signalpane daemon --foreground`,
-  `signalpane tui`, `signalpane status`, `signalpane sources`, and
-  `signalpane mark-read <id>`.
-- LaunchAgent support is limited to the user-level
-  `signalpane launch-agent install|uninstall|status` commands and
-  `~/Library/LaunchAgents/com.faronan.signalpane.plist`.
-- Do not add LaunchDaemon, root-level install, Ghostty notification, OAuth,
-  Keychain, or Notion support unless the task explicitly asks for that follow-up
-  scope.
-- Do not create files under `/Library/LaunchDaemons` or any root-owned location
-  for MVP work.
+- MVP の実行形態は `signalpane daemon --foreground`、`signalpane tui`、`signalpane status`、`signalpane sources`、`signalpane mark-read <id>` です。
+- LaunchAgent support は user-level の `signalpane launch-agent install|uninstall|status|restart|logs` と `~/Library/LaunchAgents/com.faronan.signalpane.plist` に限定します。
+- 明示依頼なしに LaunchDaemon、root-level install、Ghostty notification、OAuth、Keychain、Notion support を追加しないでください。
+- MVP work で `/Library/LaunchDaemons` や root-owned location に file を作らないでください。
 
 ## Config, State, and Secrets
 
-- Config path: `~/.config/signalpane/config.toml`.
-- State, database, and socket path: `~/.local/state/signalpane/`.
-- Log path: `~/.local/state/signalpane/logs/daemon.log`.
-- Secrets are environment variables only:
-  `SIGNALPANE_GITHUB_TOKEN`, `SIGNALPANE_SLACK_USER_TOKEN`, and
-  `SIGNALPANE_SLACK_USER_ID`.
-- Never store tokens, cookies, Slack workspace secrets, GitHub tokens, or local
-  personal credentials in this repository, fixtures, config examples, tests, or
-  logs.
+- Config path: `~/.config/signalpane/config.toml`
+- State、database、socket path: `~/.local/state/signalpane/`
+- Log path: `~/.local/state/signalpane/logs/daemon.log`
+- Secrets は environment variables のみです: `SIGNALPANE_GITHUB_TOKEN`、`SIGNALPANE_SLACK_USER_TOKEN`、`SIGNALPANE_SLACK_USER_ID`
+- token、cookie、Slack workspace secret、GitHub token、local personal credential を repository、fixture、config example、test、log に保存しないでください。
 
 ## Collector Rules
 
-- GitHub collector should use the REST Notifications API model and preserve
-  cursor behavior around `Last-Modified`, `If-Modified-Since`, and
-  `X-Poll-Interval`.
-- GitHub MVP reasons are `mention`, `team_mention`, and `review_requested`.
-- Slack MVP is user-token polling with an explicit channel allowlist and direct
-  user mention filtering for `<@USERID>`.
-- Slack MVP must not attempt to reproduce the full Slack notification inbox.
-  Ignore `<!subteam^...>`, `<!here>`, and `<!channel>` for direct mention events.
-- API-independent parser behavior should be covered by fixtures before changing
-  live request logic.
+- GitHub collector は REST Notifications API model を使い、`Last-Modified`、`If-Modified-Since`、`X-Poll-Interval` の cursor behavior を維持します。
+- GitHub MVP reasons は `mention`、`team_mention`、`review_requested` です。追加 reason や deeper issue/commit fetch は follow-up scope として扱います。
+- GitHub Notifications API は classic PAT 前提です。fine-grained PAT / GitHub App token 対応をこの collector に追加しないでください。
+- Slack MVP は user-token polling、explicit channel allowlist、`<@USERID>` direct mention filtering です。
+- Slack MVP は full Slack notification inbox を再現しません。direct mention event では `<!subteam^...>`、`<!here>`、`<!channel>` を無視します。
+- API-independent parser behavior は live request logic を変更する前に fixture でカバーしてください。
 
 ## Development Workflow
 
-- Use TDD for behavior changes: inspect current code, add or update a focused
-  failing test/fixture, implement the change, then refactor.
-- Keep tests API-free by default. Prefer fixture parser tests, temp SQLite store
-  tests, and IPC tests over live GitHub or Slack calls.
-- Avoid broad refactors during feature work. Preserve the daemon, collector,
-  store, IPC, and TUI separation unless the task is explicitly a refactor.
-- Use `apply_patch` for manual edits. Do not rewrite files with shell heredocs.
+- behavior change は TDD で進めます。current code を調べ、focused failing test / fixture を追加または更新し、実装してから refactor します。
+- test は API-free を default にします。live GitHub / Slack call より、fixture parser test、temp SQLite store test、IPC test を優先します。
+- feature work 中に broad refactor を混ぜないでください。明示的な refactor task でない限り daemon、collector、store、IPC、TUI の分離を保ちます。
+- manual edit には `apply_patch` を使います。shell heredoc で file を rewrite しないでください。
 
 ## Quality Commands
 
-Run these before finishing code changes:
+code change 後は、完了前に次を実行します。
 
 ```sh
 cargo fmt --check
@@ -78,37 +52,21 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Project-local Codex policy in `.codex/rules/quality.rules` allows these checks
-without extra approval in this repository.
+docs-only change では `git diff --check -- README.md AGENTS.md` と対象文言の `rg` 確認を最低限実行し、cargo gate を未実行にする場合は理由を最終報告に書きます。
 
-GitHub Actions mirrors the local gate in `.github/workflows/ci.yml`. Branch
-pushes and pull requests must run `cargo test`, `cargo fmt --check`, and
-`cargo clippy --all-targets -- -D warnings`.
+Project-local Codex policy は `.codex/rules/quality.rules` でこれらの check を許可しています。GitHub Actions は `.github/workflows/ci.yml` で同じ gate を branch push と pull request に実行します。
 
 ## Release Workflow
 
-- `.github/workflows/release.yml` runs only for stable release tags matching
-  `vX.Y.Z`.
-- The release workflow repeats the cargo quality gate before packaging.
-- Binary releases target Apple Silicon Macs only:
-  `aarch64-apple-darwin`. Do not add Intel or universal macOS artifacts unless
-  the task explicitly asks for that scope.
-- Release assets are `signalpane-vX.Y.Z-aarch64-apple-darwin.tar.gz` and
-  `SHA256SUMS`, uploaded to a published GitHub Release.
-- Before publishing a GitHub Release, the workflow must smoke the generated
-  tarball by extracting it and running only network-free, token-free,
-  non-destructive commands from the packaged binary. Keep this smoke limited to
-  artifact executability, version/help output, and user-level LaunchAgent status
-  checks unless a follow-up task explicitly expands the release gate.
-- The binary install/update flow uses `~/.local/bin/signalpane` and must not
-  write config, secrets, database, socket, read state, or logs outside the paths
-  documented in this file.
+- `.github/workflows/release.yml` は `vX.Y.Z` に一致する stable release tag だけで実行します。
+- release workflow は packaging 前に cargo quality gate を繰り返します。
+- binary release target は Apple Silicon Mac の `aarch64-apple-darwin` だけです。明示依頼なしに Intel / universal macOS artifact を追加しないでください。
+- release assets は `signalpane-vX.Y.Z-aarch64-apple-darwin.tar.gz` と `SHA256SUMS` です。
+- GitHub Release publish 前の artifact smoke は network-free、token-free、non-destructive に保ちます。scope は artifact executability、version/help output、user-level LaunchAgent status check に限定します。
+- binary install/update flow は `~/.local/bin/signalpane` を使い、config、secret、database、socket、read state、log を README に書いた path の外へ書きません。
 
 ## Documentation
 
-- Keep `README.md` user-facing and concise: setup, runtime paths, commands, and
-  configuration examples.
-- Keep `AGENTS.md` agent-facing and repo-specific. Do not duplicate broad
-  user-level workflow preferences unless this repository needs a stricter rule.
-- Document any new public command, config key, env var, or persistent schema
-  change in the same change set.
+- `README.md` は user-facing に保ちます。setup、runtime paths、token 要件、LaunchAgent 運用、troubleshooting、configuration examples は README に置きます。
+- `AGENTS.md` は agent-facing かつ repo-specific に保ちます。broad user-level workflow preference や README の詳細手順を重複させないでください。
+- 新しい public command、config key、env var、persistent schema、runtime path、release asset を追加または変更する場合は、同じ change set で `README.md` を更新します。

@@ -1,8 +1,16 @@
 # signalpane
 
-Local developer notification hub for GitHub and Slack mentions.
+`signalpane` は、GitHub notifications と Slack の個人メンションをローカルで集約する developer notification hub です。MVP は Rust CLI、foreground daemon、SQLite store、Unix domain socket IPC、fixture-tested collectors、薄い Ratatui TUI で構成されています。
 
-## MVP commands
+## 対応範囲
+
+- GitHub: unread notification のうち `mention`、`team_mention`、`review_requested` だけを取り込みます。
+- Slack: allowlist した conversation/channel 内の `<@USERID>` direct mention だけを取り込みます。
+- Slack の `<!here>`、`<!channel>`、`<!subteam^...>` user group mention、full Slack notification inbox の再現は MVP 対象外です。
+- 常駐は macOS user LaunchAgent のみ対応します。`sudo`、`/Library/LaunchDaemons`、root-owned path、system-wide service は使いません。
+- release binary は Apple Silicon macOS 用の `aarch64-apple-darwin` のみです。
+
+## MVP コマンド
 
 ```sh
 signalpane config init
@@ -19,14 +27,9 @@ signalpane launch-agent restart
 signalpane launch-agent logs --lines 100
 ```
 
-## Install on Apple Silicon macOS
+## Apple Silicon macOS へインストール
 
-Release binaries are built for Apple Silicon Macs, which use the
-`aarch64-apple-darwin` Rust target. Intel Macs are not part of the current binary
-release scope.
-
-Install the latest release without Rust by replacing `v0.1.0` with the release
-tag you want:
+Rust toolchain なしで release binary を使う場合は、`v0.1.0` を使いたい release tag に置き換えて実行します。
 
 ```sh
 TAG=v0.1.0
@@ -43,7 +46,7 @@ mkdir -p "${HOME}/.local/bin"
 install -m 0755 signalpane "${HOME}/.local/bin/signalpane"
 ```
 
-Make sure `~/.local/bin` is on your `PATH`.
+`~/.local/bin` を `PATH` に入れてください。
 
 ```sh
 # zsh
@@ -54,86 +57,23 @@ exec zsh -l
 fish_add_path ~/.local/bin
 ```
 
-If macOS blocks a downloaded binary because of quarantine metadata, remove that
-attribute from the installed binary:
+macOS quarantine metadata で実行が止まる場合は、インストール済み binary の属性を外します。
 
 ```sh
 xattr -dr com.apple.quarantine "${HOME}/.local/bin/signalpane"
 ```
 
-To update, repeat the download, checksum, extract, and `install` steps with a
-newer release tag. Updating only replaces `~/.local/bin/signalpane`; it does not
-modify your config, secrets, database, socket, or logs.
-
-## macOS user LaunchAgent
-
-After installing the binary at its final path, register the foreground daemon as
-a macOS user LaunchAgent:
+インストール後は、debug binary ではなく release binary が使われていることを確認します。
 
 ```sh
-signalpane launch-agent install
+signalpane --version
+type signalpane
 signalpane launch-agent status
-signalpane launch-agent restart
-signalpane launch-agent logs --lines 100
-signalpane launch-agent uninstall
 ```
 
-The LaunchAgent is limited to
-`~/Library/LaunchAgents/com.faronan.signalpane.plist` and the user launchd
-domain. It does not use `sudo`, `/Library/LaunchDaemons`, root-owned paths, or
-system-wide services. The generated plist runs the existing daemon command:
+`signalpane launch-agent status` の `binary_path` が `~/.local/bin/signalpane` を指していれば、LaunchAgent も release install 先を使っています。
 
-```sh
-signalpane daemon --foreground
-```
-
-The plist writes stdout and stderr to
-`~/.local/state/signalpane/logs/daemon.log`. Config, state, database, socket, and
-collector logs continue to use the runtime locations documented below.
-
-`signalpane launch-agent status` prints both launchd and daemon diagnostics:
-
-```text
-label=com.faronan.signalpane
-loaded=true
-daemon_ipc=responsive
-socket_path=/Users/alice/.local/state/signalpane/signalpane.sock
-log_path=/Users/alice/.local/state/signalpane/logs/daemon.log
-plist_path=/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist
-binary_path=/Users/alice/.local/bin/signalpane
-```
-
-`binary_path` is read from the installed plist when possible. If it differs from
-the currently running `signalpane` binary, status prints a `warning=` line. Run
-`signalpane launch-agent install` again to rewrite the plist with the current
-binary path.
-
-`signalpane launch-agent restart` uses the existing plist, runs `launchctl
-bootout` when loaded, then runs `launchctl bootstrap`. It does not rewrite the
-plist. `signalpane launch-agent logs` prints the daemon log path, whether the log
-exists, and the last 100 lines by default. Use `--lines <n>` to change the tail
-length.
-
-If `loaded=false` but `daemon_ipc=responsive`, a foreground
-`signalpane daemon --foreground` is already responding on the socket. Stop that
-foreground daemon before running `signalpane launch-agent install` or
-`signalpane launch-agent restart`; those commands abort when this conflict is
-detected.
-
-Secrets are not written to the plist. If the daemon needs GitHub or Slack
-credentials when launched by launchd, provide them through the user launchd
-environment before installing or restarting the LaunchAgent:
-
-```sh
-launchctl setenv SIGNALPANE_GITHUB_TOKEN "<github-token>"
-launchctl setenv SIGNALPANE_SLACK_USER_TOKEN "<slack-user-token>"
-launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
-```
-
-Values set with `launchctl setenv` are scoped to the current user launchd
-session and are not persisted across logout or reboot. Set them again after
-login before installing or restarting the LaunchAgent when collectors need
-credentials.
+更新時は、新しい release tag で download、checksum、extract、`install` を繰り返します。更新で置き換わるのは `~/.local/bin/signalpane` だけです。config、secret、database、socket、read state、log は変更されません。
 
 ## Runtime locations
 
@@ -141,72 +81,54 @@ credentials.
 - State, database, socket: `~/.local/state/signalpane/`
 - Logs: `~/.local/state/signalpane/logs/daemon.log`
 
-Secrets are read from environment variables only:
+Secrets は環境変数からだけ読みます。
 
 - `SIGNALPANE_GITHUB_TOKEN`
 - `SIGNALPANE_SLACK_USER_TOKEN`
 - `SIGNALPANE_SLACK_USER_ID`
 
-Do not store tokens in this repository or in `config.toml`.
+token はこの repository、`config.toml`、plist、log に保存しないでください。
 
-## Setup config
+## Token 要件
 
-The MVP reads config from `~/.config/signalpane/config.toml`. Create the default
-config file after installing the binary:
+### GitHub
+
+GitHub collector は REST Notifications API を使います。この endpoint は personal access token (classic) 前提です。
+
+- 最小 scope は `notifications` です。
+- private repository の issue や commit を別 endpoint で深く読む用途まで広げる場合は `repo` scope を検討します。MVP の notification polling だけなら、まず `notifications` に留めます。
+- fine-grained PAT、GitHub App user access token、GitHub App installation access token では `GET /notifications` は使えません。
+
+### Slack
+
+Slack collector は user token 前提です。token 形式は `xoxp-...` です。
+
+`conversations.history` で読む conversation 種別に応じて、user token に次の scope が必要です。
+
+- public channel: `channels:history`
+- private channel: `groups:history`
+- DM: `im:history`
+- group DM: `mpim:history`
+
+bot token でも `conversations.history` 自体は使えますが、読める範囲は bot が参加している conversation に限られます。個人の mention inbox として使うこの MVP では user token を使ってください。
+
+`SIGNALPANE_SLACK_USER_ID` には自分の Slack user ID を入れます。形式は通常 `U...` です。未設定でも `auth.test` で解決しますが、明示しておくと token と user ID の切り分けがしやすくなります。user ID は token ではありませんが、runtime 設定として環境変数に置きます。
+
+## Config 設定
+
+default config を作ります。
 
 ```sh
 signalpane config init
 ```
 
-`config init` creates `~/.config/signalpane/config.toml` and refuses to
-overwrite an existing file. Inspect the normalized config with:
+`config init` は `~/.config/signalpane/config.toml` を作成し、既存 file は上書きしません。正規化された config は次で確認できます。
 
 ```sh
 signalpane config list
 ```
 
-Edit `~/.config/signalpane/config.toml` to add the Slack channel IDs that
-signalpane should poll:
-
-```toml
-[slack]
-channels = ["C0123456789"]
-```
-
-Config changes are read when `signalpane daemon --foreground` starts, so restart
-the foreground daemon after editing this file.
-
-## Foreground daemon diagnostics
-
-`signalpane status` keeps the first line stable:
-
-```sh
-unread=0 total=0
-```
-
-It also prints the daemon log path and per-source/cursor diagnostics. Sources
-with stored cursors are listed once per cursor, so Slack channels expose
-independent health rows. `signalpane sources` keeps the existing source, label,
-enabled, unread, and cursor fields, and adds:
-
-- `cursor_key`: cursor row being reported, for example `channel:C0123456789`.
-- `poll_after`: next time the daemon should poll that source or channel.
-- `last_success`: last successful collector run for the cursor.
-- `last_error_at`: time of the most recent collector error, or `-`.
-- `last_error`: most recent collector error, or `-`.
-- `failures`: consecutive collector failures for the cursor.
-
-Collector errors are written to the SQLite cursor metadata and to
-`~/.local/state/signalpane/logs/daemon.log`. A failing source or Slack channel is
-backed off independently and does not stop other collectors in the foreground
-daemon.
-
-API requests use a fixed 10 second timeout. Successful polls prefer source API
-retry hints first (`X-Poll-Interval` for GitHub and `Retry-After` for Slack),
-then fall back to `poll_interval_seconds` from config. Collector failures use an
-exponential backoff starting at 60 seconds and capped at 15 minutes.
-
-## Example config
+Slack は channel name ではなく conversation/channel ID を `channels` に書きます。
 
 ```toml
 [github]
@@ -219,30 +141,139 @@ channels = ["C0123456789"]
 poll_interval_seconds = 60
 ```
 
-Slack MVP uses a user token, an explicit channel allowlist, and message text
-filtering for `<@USERID>` mentions. It does not attempt to reproduce the full
-Slack notification inbox.
+代表的な ID prefix は public channel の `C...`、private channel/group の `G...`、DM の `D...` です。Slack の conversation ID は workspace や作成時期で prefix が変わることがあるため、最終的には Slack UI や API で見える ID を使ってください。
 
-## CI and releases
+channel ID は次の方法で確認できます。
 
-GitHub Actions runs `cargo test`, `cargo fmt --check`, and
-`cargo clippy --all-targets -- -D warnings` for branch pushes and pull requests.
+- Slack の channel details や channel management tools で channel ID を見る。
+- Slack web URL の `https://app.slack.com/client/TXXXXXXX/CXXXXXXX` の conversation 部分を確認する。
+- 必要な `*:read` scope がある場合は `conversations.info` で対象 conversation を確認する。
 
-Pushing a `vX.Y.Z` tag creates a published GitHub Release with these assets:
+Config 変更は daemon 起動時に読み込まれます。`signalpane daemon --foreground` を使っている場合は daemon を再起動してください。LaunchAgent を使っている場合は `signalpane launch-agent restart` を実行します。
+
+## 初回設定順
+
+1. `signalpane config init`
+2. `~/.config/signalpane/config.toml` を編集し、Slack の allowlist channel ID を設定する
+3. GitHub / Slack collector を使う場合は user launchd environment に secret を設定する
+4. 初回は `signalpane launch-agent install`、既に plist がある場合や設定変更後は `signalpane launch-agent restart`
+5. `signalpane launch-agent status`
+6. `signalpane status`
+7. `signalpane sources`
+8. 必要なら `signalpane launch-agent logs --lines 100`
+
+LaunchAgent から daemon を起動する場合、secret は plist には書きません。起動前に user launchd environment へ渡します。
+
+```sh
+launchctl setenv SIGNALPANE_GITHUB_TOKEN "<github-token>"
+launchctl setenv SIGNALPANE_SLACK_USER_TOKEN "<slack-user-token>"
+launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
+```
+
+`launchctl setenv` の値は現在の user launchd session にだけ効きます。logout や reboot では永続化されません。再ログイン後は token を再設定し、その後に `signalpane launch-agent restart` を実行してください。
+
+## macOS user LaunchAgent
+
+インストール済み binary の path が確定してから user LaunchAgent を登録します。
+
+```sh
+signalpane launch-agent install
+signalpane launch-agent status
+signalpane launch-agent restart
+signalpane launch-agent logs --lines 100
+signalpane launch-agent uninstall
+```
+
+LaunchAgent は `~/Library/LaunchAgents/com.faronan.signalpane.plist` だけを使い、user launchd domain で動きます。生成される plist は次の daemon command を実行します。
+
+```sh
+signalpane daemon --foreground
+```
+
+stdout/stderr は `~/.local/state/signalpane/logs/daemon.log` に出ます。config、state、database、socket、collector log は runtime locations に従います。
+
+`signalpane launch-agent status` は launchd と daemon IPC の状態を出します。
+
+```text
+label=com.faronan.signalpane
+loaded=true
+daemon_ipc=responsive
+socket_path=/Users/alice/.local/state/signalpane/signalpane.sock
+log_path=/Users/alice/.local/state/signalpane/logs/daemon.log
+plist_path=/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist
+binary_path=/Users/alice/.local/bin/signalpane
+```
+
+起動成功の目安は次の状態です。
+
+- `loaded=true`
+- `daemon_ipc=responsive`
+- `binary_path=~/.local/bin/signalpane`
+- `signalpane status` が `unread=... total=...` を返す
+- `signalpane sources` に GitHub / Slack の `cursor_key`、`poll_after`、`last_success`、`last_error`、`failures` が出る
+
+`binary_path` は plist に登録された binary path から読みます。現在実行している `signalpane` と違う場合は `warning=` が出ます。`signalpane launch-agent install` を再実行すると、現在の binary path で plist を書き直します。
+
+`signalpane launch-agent restart` は既存 plist を使い、loaded の場合は `launchctl bootout` してから `launchctl bootstrap` します。plist は書き換えません。
+
+`loaded=false` かつ `daemon_ipc=responsive` の場合は、foreground の `signalpane daemon --foreground` が socket を掴んでいます。その daemon を止めてから `signalpane launch-agent install` または `signalpane launch-agent restart` を実行してください。
+
+## Diagnostics
+
+`signalpane status` の先頭行は安定しています。
+
+```text
+unread=0 total=0
+```
+
+続けて daemon log path と source/cursor ごとの状態を出します。`signalpane sources` も source、label、enabled、unread、cursor に加えて次を出します。
+
+- `cursor_key`: 例 `notifications`、`channel:C0123456789`
+- `poll_after`: 次に poll できる時刻
+- `last_success`: cursor の最終成功時刻
+- `last_error_at`: 最終 error 時刻、なければ `-`
+- `last_error`: 最終 error、なければ `-`
+- `failures`: 連続失敗数
+
+collector error は SQLite cursor metadata と `~/.local/state/signalpane/logs/daemon.log` に記録します。GitHub や Slack の一部 channel が失敗しても、他 collector は止めません。
+
+API request timeout は 10 秒固定です。成功時は API 側の retry hint を優先します。GitHub は `X-Poll-Interval`、Slack は `Retry-After` を見ます。hint がなければ config の `poll_interval_seconds` を使います。失敗時は 60 秒から始まり最大 15 分まで exponential backoff します。
+
+## よくある失敗
+
+| 症状                                        | 見る場所                                                                                                                                             | 対処                                                                                                                       |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `daemon_ipc=unreachable`                    | `signalpane launch-agent status`, `signalpane status`, `signalpane launch-agent logs --lines 100`, `launchctl print gui/$UID/com.faronan.signalpane` | 起動直後なら少し待つ。log の collector error と plist の `binary_path` を確認する。                                        |
+| GitHub `401 Unauthorized`                   | `signalpane sources`, daemon log                                                                                                                     | `SIGNALPANE_GITHUB_TOKEN` の値、classic PAT かどうか、`notifications` または `repo` scope を確認する。                     |
+| Slack `missing_scope`                       | `signalpane sources`, daemon log                                                                                                                     | conversation 種別に応じて `channels:history` / `groups:history` / `im:history` / `mpim:history` を user token に追加する。 |
+| Slack `channel_not_found`                   | `signalpane sources`, daemon log                                                                                                                     | `config.toml` が channel name ではなく ID を使っているか、ID の workspace が token と一致しているか確認する。              |
+| Slack `not_in_channel`                      | `signalpane sources`, daemon log                                                                                                                     | user token の user が対象 private channel / DM / group DM を読めるか、所属・可視性・scope を確認する。                     |
+| `loaded=false` かつ `daemon_ipc=responsive` | `signalpane launch-agent status`                                                                                                                     | foreground daemon が socket を掴んでいる。foreground daemon を止めてから LaunchAgent を install/restart する。             |
+
+## セキュリティ注意
+
+- README、config example、fixture、plist、log、repository に token 実値を書かないでください。
+- `SIGNALPANE_GITHUB_TOKEN` と `SIGNALPANE_SLACK_USER_TOKEN` は secret です。
+- `SIGNALPANE_SLACK_USER_ID` は token ではありませんが、runtime の識別情報として環境変数に置きます。
+- `launchctl setenv ... "<token>"` を shell に直接入力すると shell history に残る可能性があります。誤って残した場合は history から消し、必要なら token を rotate してください。
+
+## CI と release
+
+GitHub Actions は branch push と pull request で次を実行します。
+
+```sh
+cargo test
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+`vX.Y.Z` tag を push すると、次の asset を持つ GitHub Release を publish します。
 
 - `signalpane-vX.Y.Z-aarch64-apple-darwin.tar.gz`
 - `SHA256SUMS`
 
-Release binaries are intended for Apple Silicon Macs and are not currently
-notarized or packaged as a macOS app bundle.
+Release binary は Apple Silicon Mac 向けです。現時点では notarized macOS app bundle ではありません。
 
-Before publishing a GitHub Release, the release workflow smokes the generated
-tarball on the macOS Apple Silicon runner. It extracts the artifact, verifies
-that the included `signalpane` binary is executable, checks `signalpane --help`
-and `signalpane --version`, and runs `signalpane launch-agent status` with
-isolated config and state paths.
+GitHub Release を publish する前に、release workflow は macOS Apple Silicon runner で tarball smoke を実行します。artifact を展開し、binary が executable であること、`signalpane --help`、`signalpane --version`、isolated config/state での `signalpane launch-agent status` を確認します。
 
-This smoke test confirms that the release artifact is minimally executable as a
-distribution binary. It does not cover local installation paths, shell `PATH`
-setup, macOS quarantine handling, daemon IPC, live GitHub or Slack collectors,
-tokens, network access, Homebrew, self-update, SLSA, or SBOM guarantees.
+この smoke test は distribution binary の最小実行性だけを確認します。local install path、shell `PATH`、macOS quarantine、daemon IPC、live GitHub / Slack collectors、tokens、network access、Homebrew、self-update、SLSA、SBOM は保証しません。
