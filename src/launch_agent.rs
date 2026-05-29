@@ -51,6 +51,14 @@ pub fn install(paths: &AppPaths) -> Result<LaunchAgentStatus> {
     platform::install(paths)
 }
 
+pub fn start(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+    platform::start(paths)
+}
+
+pub fn stop(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+    platform::stop(paths)
+}
+
 pub fn uninstall(paths: &AppPaths) -> Result<LaunchAgentStatus> {
     platform::uninstall(paths)
 }
@@ -184,7 +192,7 @@ fn build_status(
     }
     if foreground_socket_conflict(loaded, daemon_ipc) {
         warnings.push(format!(
-            "foreground daemon appears to be running at {}; stop it before launch-agent install or restart",
+            "foreground daemon appears to be running at {}; stop it before launch-agent install, start, or restart",
             paths.socket_file.display()
         ));
     }
@@ -281,7 +289,7 @@ fn ensure_no_foreground_socket_conflict(
 ) -> Result<()> {
     if foreground_socket_conflict(loaded, daemon_ipc) {
         anyhow::bail!(
-            "foreground daemon appears to be running at {}; stop it before launch-agent install or restart",
+            "foreground daemon appears to be running at {}; stop it before launch-agent install, start, or restart",
             socket_path.display()
         );
     }
@@ -343,6 +351,90 @@ mod platform {
         ))
     }
 
+    pub fn start(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+        paths.ensure_dirs()?;
+        let plist_path = launch_agent_path_from_env()?;
+        let domain = gui_domain()?;
+        let service_target = service_target()?;
+        let current_binary_path =
+            std::env::current_exe().context("failed to resolve current executable")?;
+        start_with(
+            paths,
+            plist_path,
+            &domain,
+            &service_target,
+            &SystemLaunchctl,
+            current_binary_path,
+        )
+    }
+
+    fn start_with(
+        paths: &AppPaths,
+        plist_path: PathBuf,
+        domain: &str,
+        service_target: &str,
+        launchctl: &impl Launchctl,
+        current_binary_path: PathBuf,
+    ) -> Result<LaunchAgentStatus> {
+        if !plist_path.exists() {
+            bail!(
+                "LaunchAgent plist does not exist at {}; run `signalpane launch-agent install` first",
+                plist_path.display()
+            );
+        }
+
+        let loaded = is_loaded_with(launchctl, service_target)?;
+        let daemon_ipc = probe_daemon_ipc(&paths.socket_file);
+        ensure_no_foreground_socket_conflict(loaded, daemon_ipc, &paths.socket_file)?;
+
+        if !loaded {
+            let output = launchctl.bootstrap(domain, &plist_path)?;
+            ensure_success(output, "launchctl bootstrap")?;
+        }
+
+        Ok(build_status(
+            paths,
+            plist_path,
+            true,
+            current_binary_path,
+            probe_daemon_ipc(&paths.socket_file),
+        ))
+    }
+
+    pub fn stop(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+        let plist_path = launch_agent_path_from_env()?;
+        let service_target = service_target()?;
+        let current_binary_path =
+            std::env::current_exe().context("failed to resolve current executable")?;
+        stop_with(
+            paths,
+            plist_path,
+            &service_target,
+            &SystemLaunchctl,
+            current_binary_path,
+        )
+    }
+
+    fn stop_with(
+        paths: &AppPaths,
+        plist_path: PathBuf,
+        service_target: &str,
+        launchctl: &impl Launchctl,
+        current_binary_path: PathBuf,
+    ) -> Result<LaunchAgentStatus> {
+        if is_loaded_with(launchctl, service_target)? {
+            bootout_loaded(launchctl, service_target)?;
+        }
+
+        Ok(build_status(
+            paths,
+            plist_path,
+            false,
+            current_binary_path,
+            probe_daemon_ipc(&paths.socket_file),
+        ))
+    }
+
     pub fn uninstall(paths: &AppPaths) -> Result<LaunchAgentStatus> {
         let plist_path = launch_agent_path_from_env()?;
         let service_target = service_target()?;
@@ -365,7 +457,13 @@ mod platform {
         launchctl: &impl Launchctl,
         current_binary_path: PathBuf,
     ) -> Result<LaunchAgentStatus> {
-        bootout_if_loaded(launchctl, service_target)?;
+        stop_with(
+            paths,
+            plist_path.clone(),
+            service_target,
+            launchctl,
+            current_binary_path.clone(),
+        )?;
 
         match fs::remove_file(&plist_path) {
             Ok(()) => {}
@@ -493,13 +591,6 @@ mod platform {
             return Ok(false);
         }
         ensure_success(output, "launchctl print").map(|_| true)
-    }
-
-    fn bootout_if_loaded(launchctl: &impl Launchctl, service_target: &str) -> Result<()> {
-        if !is_loaded_with(launchctl, service_target)? {
-            return Ok(());
-        }
-        bootout_loaded(launchctl, service_target)
     }
 
     fn bootout_loaded(launchctl: &impl Launchctl, service_target: &str) -> Result<()> {
@@ -708,6 +799,178 @@ mod platform {
         }
 
         #[test]
+        fn start_bootstraps_existing_unloaded_plist_without_rewriting_it() {
+            let dir = tempdir().expect("tempdir");
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+            let plist_path = dir.path().join("com.faronan.signalpane.plist");
+            let plist = render_plist(Path::new("/Users/alice/.local/bin/signalpane"), &paths);
+            fs::write(&plist_path, &plist).expect("write plist");
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(Some(command_output(
+                    113,
+                    "",
+                    "Could not find service \"com.faronan.signalpane\"\n",
+                ))),
+                bootout_output: RefCell::new(None),
+                bootstrap_output: RefCell::new(Some(command_output(0, "", ""))),
+                calls: RefCell::new(Vec::new()),
+            };
+
+            start_with(
+                &paths,
+                plist_path.clone(),
+                "gui/501",
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            )
+            .expect("start");
+
+            assert_eq!(fs::read_to_string(&plist_path).expect("read plist"), plist);
+            assert_eq!(
+                launchctl.calls.borrow().as_slice(),
+                &[
+                    "print gui/501/com.faronan.signalpane",
+                    &format!("bootstrap gui/501 {}", plist_path.display()),
+                ]
+            );
+        }
+
+        #[test]
+        fn start_requires_existing_plist() {
+            let dir = tempdir().expect("tempdir");
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(None),
+                bootout_output: RefCell::new(None),
+                bootstrap_output: RefCell::new(None),
+                calls: RefCell::new(Vec::new()),
+            };
+
+            let err = start_with(
+                &paths,
+                dir.path().join("missing.plist"),
+                "gui/501",
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            )
+            .expect_err("missing plist should fail");
+
+            assert!(
+                err.to_string()
+                    .contains("run `signalpane launch-agent install` first"),
+                "unexpected error: {err:#}"
+            );
+            assert!(launchctl.calls.borrow().is_empty());
+        }
+
+        #[test]
+        fn stop_bootouts_loaded_service_and_keeps_plist() {
+            let dir = tempdir().expect("tempdir");
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+            let plist_path = dir.path().join("com.faronan.signalpane.plist");
+            fs::write(
+                &plist_path,
+                render_plist(Path::new("/Users/alice/.local/bin/signalpane"), &paths),
+            )
+            .expect("write plist");
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(Some(command_output(0, "service = true\n", ""))),
+                bootout_output: RefCell::new(Some(command_output(0, "", ""))),
+                bootstrap_output: RefCell::new(None),
+                calls: RefCell::new(Vec::new()),
+            };
+
+            stop_with(
+                &paths,
+                plist_path.clone(),
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            )
+            .expect("stop");
+
+            assert!(plist_path.exists());
+            assert_eq!(
+                launchctl.calls.borrow().as_slice(),
+                &[
+                    "print gui/501/com.faronan.signalpane",
+                    "bootout gui/501/com.faronan.signalpane",
+                ]
+            );
+        }
+
+        #[test]
+        fn stop_unloaded_service_is_success_without_bootout() {
+            let dir = tempdir().expect("tempdir");
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+            let plist_path = dir.path().join("com.faronan.signalpane.plist");
+            fs::write(
+                &plist_path,
+                render_plist(Path::new("/Users/alice/.local/bin/signalpane"), &paths),
+            )
+            .expect("write plist");
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(Some(command_output(
+                    113,
+                    "",
+                    "Could not find service \"com.faronan.signalpane\"\n",
+                ))),
+                bootout_output: RefCell::new(None),
+                bootstrap_output: RefCell::new(None),
+                calls: RefCell::new(Vec::new()),
+            };
+
+            stop_with(
+                &paths,
+                plist_path.clone(),
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            )
+            .expect("stop");
+
+            assert!(plist_path.exists());
+            assert_eq!(
+                launchctl.calls.borrow().as_slice(),
+                &["print gui/501/com.faronan.signalpane"]
+            );
+        }
+
+        #[test]
+        fn uninstall_bootouts_loaded_service_then_removes_plist() {
+            let dir = tempdir().expect("tempdir");
+            let plist_path = dir.path().join("com.faronan.signalpane.plist");
+            fs::write(&plist_path, "plist").expect("write plist");
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(Some(command_output(0, "service = true\n", ""))),
+                bootout_output: RefCell::new(Some(command_output(0, "", ""))),
+                bootstrap_output: RefCell::new(None),
+                calls: RefCell::new(Vec::new()),
+            };
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+
+            uninstall_with(
+                &paths,
+                plist_path.clone(),
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            )
+            .expect("uninstall");
+
+            assert!(!plist_path.exists());
+            assert_eq!(
+                launchctl.calls.borrow().as_slice(),
+                &[
+                    "print gui/501/com.faronan.signalpane",
+                    "bootout gui/501/com.faronan.signalpane",
+                ]
+            );
+        }
+
+        #[test]
         fn restart_requires_existing_plist() {
             let dir = tempdir().expect("tempdir");
             let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
@@ -755,6 +1018,14 @@ mod platform {
     use super::LaunchAgentStatus;
 
     pub fn install(_paths: &AppPaths) -> Result<LaunchAgentStatus> {
+        bail!("signalpane launch-agent is macOS only")
+    }
+
+    pub fn start(_paths: &AppPaths) -> Result<LaunchAgentStatus> {
+        bail!("signalpane launch-agent is macOS only")
+    }
+
+    pub fn stop(_paths: &AppPaths) -> Result<LaunchAgentStatus> {
         bail!("signalpane launch-agent is macOS only")
     }
 

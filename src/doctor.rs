@@ -6,14 +6,12 @@ use std::{
 use anyhow::{Context, Result};
 
 use crate::{
-    config::{AppPaths, Config},
+    config::{
+        AppPaths, Config, GITHUB_TOKEN_ENV, SLACK_USER_ID_ENV, SLACK_USER_TOKEN_ENV, Secrets,
+    },
     ipc::IpcClient,
     launch_agent::{self, DaemonIpcStatus, LaunchAgentStatus},
 };
-
-const GITHUB_TOKEN_ENV: &str = "SIGNALPANE_GITHUB_TOKEN";
-const SLACK_USER_TOKEN_ENV: &str = "SIGNALPANE_SLACK_USER_TOKEN";
-const SLACK_USER_ID_ENV: &str = "SIGNALPANE_SLACK_USER_ID";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport {
@@ -222,7 +220,7 @@ pub fn check(paths: &AppPaths) -> DoctorReport {
 }
 
 trait DoctorProbe {
-    fn env_present(&self, name: &str) -> bool;
+    fn secrets(&self, paths: &AppPaths) -> Result<Secrets>;
     fn current_binary_path(&self) -> Result<PathBuf>;
     fn launch_agent_status(&self, paths: &AppPaths) -> Result<LaunchAgentStatus>;
     fn daemon_ipc_status(&self, socket_path: &Path) -> DaemonIpcStatus;
@@ -231,10 +229,8 @@ trait DoctorProbe {
 struct SystemDoctorProbe;
 
 impl DoctorProbe for SystemDoctorProbe {
-    fn env_present(&self, name: &str) -> bool {
-        env::var(name)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
+    fn secrets(&self, paths: &AppPaths) -> Result<Secrets> {
+        Secrets::load(paths)
     }
 
     fn current_binary_path(&self) -> Result<PathBuf> {
@@ -275,9 +271,22 @@ fn check_with_probe(paths: &AppPaths, probe: &impl DoctorProbe) -> DoctorReport 
         }
     };
 
-    let github_token_present = probe.env_present(GITHUB_TOKEN_ENV);
-    let slack_user_token_present = probe.env_present(SLACK_USER_TOKEN_ENV);
-    let slack_user_id_present = probe.env_present(SLACK_USER_ID_ENV);
+    let secrets = match probe.secrets(paths) {
+        Ok(secrets) => Some(secrets),
+        Err(err) => {
+            errors.push(format!("secrets load failed: {err:#}"));
+            None
+        }
+    };
+    let github_token_present = secrets
+        .as_ref()
+        .is_some_and(|secrets| secrets.github_token.is_some());
+    let slack_user_token_present = secrets
+        .as_ref()
+        .is_some_and(|secrets| secrets.slack_user_token.is_some());
+    let slack_user_id_present = secrets
+        .as_ref()
+        .is_some_and(|secrets| secrets.slack_user_id.is_some());
 
     let (github_enabled, github_status) = match config.as_ref() {
         Some(config) if !config.github.enabled => (Some(false), SourceReadiness::Disabled),
@@ -467,15 +476,15 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct FakeProbe {
-        present_env: Vec<&'static str>,
+        secrets: Secrets,
         current_binary_path: Option<PathBuf>,
         launch_agent_status: Result<LaunchAgentStatus, &'static str>,
         daemon_ipc: DaemonIpcStatus,
     }
 
     impl DoctorProbe for FakeProbe {
-        fn env_present(&self, name: &str) -> bool {
-            self.present_env.contains(&name)
+        fn secrets(&self, _paths: &AppPaths) -> Result<Secrets> {
+            Ok(self.secrets.clone())
         }
 
         fn current_binary_path(&self) -> Result<PathBuf> {
@@ -530,7 +539,7 @@ enabled = false
         let dir = tempdir().expect("tempdir");
         let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
         let mut probe = fake_probe(&paths);
-        probe.present_env = vec![GITHUB_TOKEN_ENV, SLACK_USER_TOKEN_ENV, SLACK_USER_ID_ENV];
+        probe.secrets = all_secrets();
 
         let output = check_with_probe(&paths, &probe).to_key_value();
 
@@ -623,7 +632,11 @@ enabled = true
 "#,
         );
         let mut probe = fake_probe(&paths);
-        probe.present_env = vec![SLACK_USER_TOKEN_ENV];
+        probe.secrets = Secrets {
+            github_token: None,
+            slack_user_token: Some("xoxp-secret".to_string()),
+            slack_user_id: None,
+        };
 
         let output = check_with_probe(&paths, &probe).to_key_value();
 
@@ -697,7 +710,7 @@ secret = "xoxp-secret"
 "#,
         );
         let mut probe = fake_probe(&paths);
-        probe.present_env = vec![GITHUB_TOKEN_ENV, SLACK_USER_TOKEN_ENV, SLACK_USER_ID_ENV];
+        probe.secrets = all_secrets();
 
         let output = check_with_probe(&paths, &probe).to_key_value();
 
@@ -712,7 +725,11 @@ secret = "xoxp-secret"
             .join("LaunchAgents")
             .join("com.faronan.signalpane.plist");
         FakeProbe {
-            present_env: Vec::new(),
+            secrets: Secrets {
+                github_token: None,
+                slack_user_token: None,
+                slack_user_id: None,
+            },
             current_binary_path: Some(PathBuf::from("/Users/alice/.local/bin/signalpane")),
             launch_agent_status: Ok(LaunchAgentStatus {
                 label: launch_agent::LABEL,
@@ -725,6 +742,14 @@ secret = "xoxp-secret"
                 warnings: Vec::new(),
             }),
             daemon_ipc: DaemonIpcStatus::Responsive,
+        }
+    }
+
+    fn all_secrets() -> Secrets {
+        Secrets {
+            github_token: Some("ghp-secret".to_string()),
+            slack_user_token: Some("xoxp-secret".to_string()),
+            slack_user_id: Some("U123".to_string()),
         }
     }
 

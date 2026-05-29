@@ -15,6 +15,11 @@
 ```sh
 signalpane config init
 signalpane config list
+signalpane secrets path
+signalpane secrets check
+signalpane secrets set github-token
+signalpane secrets set slack-user-token
+signalpane secrets set slack-user-id
 signalpane daemon --foreground
 signalpane tui
 signalpane status
@@ -22,6 +27,8 @@ signalpane doctor
 signalpane sources
 signalpane mark-read <id>
 signalpane launch-agent install
+signalpane launch-agent start
+signalpane launch-agent stop
 signalpane launch-agent uninstall
 signalpane launch-agent status
 signalpane launch-agent restart
@@ -74,7 +81,7 @@ signalpane launch-agent status
 
 `signalpane launch-agent status` の `binary_path` が `~/.local/bin/signalpane` を指していれば、LaunchAgent も release install 先を使っています。
 
-更新時は、新しい release tag で download、checksum、extract、`install` を繰り返します。更新で置き換わるのは `~/.local/bin/signalpane` だけです。config、secret、database、socket、read state、log は変更されません。
+更新時は、新しい release tag で download、checksum、extract、`install` を繰り返します。更新で置き換わるのは `~/.local/bin/signalpane` だけです。config、`secrets.env`、database、socket、read state、log は変更されません。
 
 LaunchAgent を使っている場合は、binary 更新後に daemon を再起動して新しい binary を読み込ませます。
 
@@ -87,15 +94,16 @@ signalpane doctor
 
 - Config: `~/.config/signalpane/config.toml`
 - State, database, socket: `~/.local/state/signalpane/`
+- Secrets: `~/.local/state/signalpane/secrets.env`
 - Logs: `~/.local/state/signalpane/logs/daemon.log`
 
-Secrets は環境変数からだけ読みます。
+Secrets は環境変数または `~/.local/state/signalpane/secrets.env` から読みます。優先順位は `environment variables > secrets.env > none` です。
 
 - `SIGNALPANE_GITHUB_TOKEN`
 - `SIGNALPANE_SLACK_USER_TOKEN`
 - `SIGNALPANE_SLACK_USER_ID`
 
-token はこの repository、`config.toml`、plist、log に保存しないでください。
+token はこの repository、`config.toml`、plist、log に保存しないでください。`secrets.env` は `0600` で保存され、`signalpane secrets check`、`signalpane doctor`、daemon log は secret の実値を出しません。
 
 ## Token 要件
 
@@ -120,7 +128,7 @@ Slack collector は user token 前提です。token 形式は `xoxp-...` です�
 
 bot token でも `conversations.history` 自体は使えますが、読める範囲は bot が参加している conversation に限られます。個人の mention inbox として使うこの MVP では user token を使ってください。
 
-`SIGNALPANE_SLACK_USER_ID` には自分の Slack user ID を入れます。形式は通常 `U...` です。未設定でも `auth.test` で解決しますが、明示しておくと token と user ID の切り分けがしやすくなります。user ID は token ではありませんが、runtime 設定として環境変数に置きます。
+`SIGNALPANE_SLACK_USER_ID` には自分の Slack user ID を入れます。形式は通常 `U...` です。未設定でも `auth.test` で解決しますが、明示しておくと token と user ID の切り分けがしやすくなります。user ID は token ではありませんが、runtime 設定として `secrets.env` または環境変数に置きます。
 
 ## Config 設定
 
@@ -159,16 +167,49 @@ channel ID は次の方法で確認できます。
 
 Config 変更は daemon 起動時に読み込まれます。`signalpane daemon --foreground` を使っている場合は daemon を再起動してください。LaunchAgent を使っている場合は `signalpane launch-agent restart` を実行します。
 
+## Secrets 設定
+
+普段使いでは `signalpane secrets set` で `~/.local/state/signalpane/secrets.env` に保存します。入力は非表示 prompt で受け取り、command argument には渡しません。
+
+```sh
+signalpane secrets path
+signalpane secrets set github-token
+signalpane secrets set slack-user-token
+signalpane secrets set slack-user-id
+signalpane secrets check
+```
+
+`secrets check` は present/missing だけを表示し、実値は出しません。
+
+```text
+SIGNALPANE_GITHUB_TOKEN=present
+SIGNALPANE_SLACK_USER_TOKEN=present
+SIGNALPANE_SLACK_USER_ID=present
+```
+
+`secrets.env` は `KEY=VALUE` の単純な形式です。空行と行頭 `#` コメントは使えます。許可されていない key や `KEY=VALUE` ではない行がある場合、daemon / doctor / secrets CLI は error にします。
+
+環境変数も引き続き使えます。環境変数がある場合は `secrets.env` より優先されるため、一時的な上書きや advanced fallback として使えます。
+
+```sh
+launchctl setenv SIGNALPANE_GITHUB_TOKEN "<github-token>"
+launchctl setenv SIGNALPANE_SLACK_USER_TOKEN "<slack-user-token>"
+launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
+```
+
+`launchctl setenv` の値は現在の user launchd session にだけ効きます。logout や reboot では永続化されません。通常運用では `signalpane secrets set ...` を使ってください。secret を変更した後、既に daemon が起動している場合は `signalpane launch-agent restart` で読み直します。
+
 ## 初回設定順
 
 1. `signalpane config init`
-2. `~/.config/signalpane/config.toml` を編集し、Slack の allowlist channel ID を設定する
-3. GitHub / Slack collector を使う場合は user launchd environment に secret を設定する
-4. 初回は `signalpane launch-agent install`、既に plist がある場合や設定変更後は `signalpane launch-agent restart`
-5. `signalpane launch-agent status`
-6. `signalpane status`
-7. `signalpane sources`
-8. 必要なら `signalpane launch-agent logs --lines 100`
+2. `signalpane secrets set github-token`
+3. `signalpane secrets set slack-user-token`
+4. `signalpane secrets set slack-user-id`
+5. `~/.config/signalpane/config.toml` を編集し、Slack の allowlist channel ID を設定する
+6. `signalpane launch-agent install`
+7. `signalpane launch-agent status`
+8. `signalpane sources`
+9. 必要なら `signalpane launch-agent logs --lines 100`
 
 ## TUI
 
@@ -184,16 +225,6 @@ Config 変更は daemon 起動時に読み込まれます。`signalpane daemon -
 - `s`: all / source ごとの filter を切り替え
 - `q`: 終了
 
-LaunchAgent から daemon を起動する場合、secret は plist には書きません。起動前に user launchd environment へ渡します。
-
-```sh
-launchctl setenv SIGNALPANE_GITHUB_TOKEN "<github-token>"
-launchctl setenv SIGNALPANE_SLACK_USER_TOKEN "<slack-user-token>"
-launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
-```
-
-`launchctl setenv` の値は現在の user launchd session にだけ効きます。logout や reboot では永続化されません。再ログイン後は token を再設定し、その後に `signalpane launch-agent restart` を実行してください。
-
 ## macOS user LaunchAgent
 
 インストール済み binary の path が確定してから user LaunchAgent を登録します。
@@ -201,6 +232,8 @@ launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
 ```sh
 signalpane launch-agent install
 signalpane launch-agent status
+signalpane launch-agent stop
+signalpane launch-agent start
 signalpane launch-agent restart
 signalpane launch-agent logs --lines 100
 signalpane launch-agent uninstall
@@ -236,13 +269,21 @@ binary_path=/Users/alice/.local/bin/signalpane
 
 `binary_path` は plist に登録された binary path から読みます。現在実行している `signalpane` と違う場合は `warning=` が出ます。`signalpane launch-agent install` を再実行すると、現在の binary path で plist を書き直します。
 
+普段使いでは、LaunchAgent はログイン時に自動起動します。通常は `signalpane status`、`signalpane tui`、`signalpane sources` を見るだけです。
+
+`signalpane launch-agent start` は既存 plist を使って bootstrap します。plist がない場合は `signalpane launch-agent install` を案内して error になります。plist は書き換えません。
+
+`signalpane launch-agent stop` は loaded の場合だけ `launchctl bootout` し、plist は削除しません。未 loaded の場合も一時停止済みとして成功扱いです。
+
 `signalpane launch-agent restart` は既存 plist を使い、loaded の場合は `launchctl bootout` してから `launchctl bootstrap` します。plist は書き換えません。
 
-`loaded=false` かつ `daemon_ipc=responsive` の場合は、foreground の `signalpane daemon --foreground` が socket を掴んでいます。その daemon を止めてから `signalpane launch-agent install` または `signalpane launch-agent restart` を実行してください。
+`signalpane launch-agent uninstall` は stop 後に `~/Library/LaunchAgents/com.faronan.signalpane.plist` を削除します。config、database、log、`secrets.env`、binary は削除しません。
+
+`loaded=false` かつ `daemon_ipc=responsive` の場合は、foreground の `signalpane daemon --foreground` が socket を掴んでいます。その daemon を止めてから `signalpane launch-agent install`、`signalpane launch-agent start`、または `signalpane launch-agent restart` を実行してください。
 
 ## Diagnostics
 
-`signalpane doctor` は config、secret の presence、LaunchAgent、daemon IPC、runtime path、registered binary path と current binary path の差分を key=value で出します。token 実値は出しません。
+`signalpane doctor` は config、effective secret の presence、LaunchAgent、daemon IPC、runtime path、registered binary path と current binary path の差分を key=value で出します。token 実値は出しません。
 
 ```text
 overall_status=warning
@@ -299,17 +340,18 @@ API request timeout は 10 秒固定です。成功時は API 側の retry hint 
 | 症状                                        | 見る場所                                                                                                                                             | 対処                                                                                                                       |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `daemon_ipc=unreachable`                    | `signalpane launch-agent status`, `signalpane status`, `signalpane launch-agent logs --lines 100`, `launchctl print gui/$UID/com.faronan.signalpane` | 起動直後なら少し待つ。log の collector error と plist の `binary_path` を確認する。                                        |
-| GitHub `401 Unauthorized`                   | `signalpane sources`, daemon log                                                                                                                     | `SIGNALPANE_GITHUB_TOKEN` の値、classic PAT かどうか、`notifications` または `repo` scope を確認する。                     |
+| GitHub `401 Unauthorized`                   | `signalpane secrets check`, `signalpane sources`, daemon log                                                                                         | `SIGNALPANE_GITHUB_TOKEN` が present か、classic PAT かどうか、`notifications` または `repo` scope を確認する。            |
 | Slack `missing_scope`                       | `signalpane sources`, daemon log                                                                                                                     | conversation 種別に応じて `channels:history` / `groups:history` / `im:history` / `mpim:history` を user token に追加する。 |
 | Slack `channel_not_found`                   | `signalpane sources`, daemon log                                                                                                                     | `config.toml` が channel name ではなく ID を使っているか、ID の workspace が token と一致しているか確認する。              |
 | Slack `not_in_channel`                      | `signalpane sources`, daemon log                                                                                                                     | user token の user が対象 private channel / DM / group DM を読めるか、所属・可視性・scope を確認する。                     |
-| `loaded=false` かつ `daemon_ipc=responsive` | `signalpane launch-agent status`                                                                                                                     | foreground daemon が socket を掴んでいる。foreground daemon を止めてから LaunchAgent を install/restart する。             |
+| `loaded=false` かつ `daemon_ipc=responsive` | `signalpane launch-agent status`                                                                                                                     | foreground daemon が socket を掴んでいる。foreground daemon を止めてから LaunchAgent を install/start/restart する。       |
 
 ## セキュリティ注意
 
 - README、config example、fixture、plist、log、repository に token 実値を書かないでください。
 - `SIGNALPANE_GITHUB_TOKEN` と `SIGNALPANE_SLACK_USER_TOKEN` は secret です。
-- `SIGNALPANE_SLACK_USER_ID` は token ではありませんが、runtime の識別情報として環境変数に置きます。
+- `SIGNALPANE_SLACK_USER_ID` は token ではありませんが、runtime の識別情報として `secrets.env` または環境変数に置きます。
+- `secrets.env` は `0600` で保存し、config や plist とは分離します。
 - `launchctl setenv ... "<token>"` を shell に直接入力すると shell history に残る可能性があります。誤って残した場合は history から消し、必要なら token を rotate してください。
 
 ## CI と release
