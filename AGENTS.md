@@ -13,8 +13,8 @@
 
 ## Runtime Scope
 
-- MVP の実行形態は `signalpane daemon --foreground`、`signalpane tui`、`signalpane status`、`signalpane sources`、`signalpane mark-read <id>` です。
-- LaunchAgent support は user-level の `signalpane launch-agent install|uninstall|status|restart|logs` と `~/Library/LaunchAgents/com.faronan.signalpane.plist` に限定します。
+- MVP の実行形態は `signalpane daemon --foreground`、`signalpane tui`、`signalpane status`、`signalpane sources`、`signalpane mark-read <id>`、`signalpane secrets path|check|set <key>` です。
+- LaunchAgent support は user-level の `signalpane launch-agent install|start|stop|uninstall|status|restart|logs` と `~/Library/LaunchAgents/com.faronan.signalpane.plist` に限定します。
 - 明示依頼なしに LaunchDaemon、root-level install、Ghostty notification、OAuth、Keychain、Notion support を追加しないでください。
 - MVP work で `/Library/LaunchDaemons` や root-owned location に file を作らないでください。
 
@@ -23,7 +23,9 @@
 - Config path: `~/.config/signalpane/config.toml`
 - State、database、socket path: `~/.local/state/signalpane/`
 - Log path: `~/.local/state/signalpane/logs/daemon.log`
-- Secrets は environment variables のみです: `SIGNALPANE_GITHUB_TOKEN`、`SIGNALPANE_SLACK_USER_TOKEN`、`SIGNALPANE_SLACK_USER_ID`
+- Secrets path: `~/.local/state/signalpane/secrets.env`
+- Secrets は environment variables または `secrets.env` から読みます。優先順位は `environment variables > secrets.env > none` です。
+- 許可する secret key は `SIGNALPANE_GITHUB_TOKEN`、`SIGNALPANE_SLACK_USER_TOKEN`、`SIGNALPANE_SLACK_USER_ID` のみです。
 - token、cookie、Slack workspace secret、GitHub token、local personal credential を repository、fixture、config example、test、log に保存しないでください。
 
 ## Collector Rules

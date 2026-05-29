@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 
 use crate::{
-    config::{AppPaths, Config, Secrets},
+    config::{AppPaths, Config, SecretKey, Secrets},
     daemon, doctor,
     ipc::IpcClient,
     launch_agent::{self, LaunchAgentStatus},
@@ -33,6 +33,10 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    Secrets {
+        #[command(subcommand)]
+        command: SecretsCommand,
+    },
     Tui,
     Status,
     Doctor,
@@ -49,6 +53,8 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum LaunchAgentCommand {
     Install,
+    Start,
+    Stop,
     Uninstall,
     Status,
     Restart,
@@ -64,6 +70,33 @@ enum ConfigCommand {
     List,
 }
 
+#[derive(Debug, Subcommand)]
+enum SecretsCommand {
+    Path,
+    Check,
+    Set {
+        #[command(subcommand)]
+        command: SecretsSetCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretsSetCommand {
+    GithubToken,
+    SlackUserToken,
+    SlackUserId,
+}
+
+impl SecretsSetCommand {
+    fn secret_key(&self) -> SecretKey {
+        match self {
+            Self::GithubToken => SecretKey::GithubToken,
+            Self::SlackUserToken => SecretKey::SlackUserToken,
+            Self::SlackUserId => SecretKey::SlackUserId,
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = AppPaths::from_env()?;
@@ -74,7 +107,7 @@ pub fn run() -> Result<()> {
             }
             paths.ensure_dirs()?;
             let config = Config::load(&paths.config_file)?;
-            let secrets = Secrets::from_env();
+            let secrets = Secrets::load(&paths)?;
             daemon::run_foreground(paths, config, secrets)
         }
         Command::Config { command } => match command {
@@ -86,6 +119,28 @@ pub fn run() -> Result<()> {
             ConfigCommand::List => {
                 let config = Config::load(&paths.config_file)?;
                 print!("{}", config.to_toml()?);
+                Ok(())
+            }
+        },
+        Command::Secrets { command } => match command {
+            SecretsCommand::Path => {
+                println!("{}", paths.secrets_file.display());
+                Ok(())
+            }
+            SecretsCommand::Check => {
+                print!("{}", format_secrets_check(&Secrets::load(&paths)?));
+                Ok(())
+            }
+            SecretsCommand::Set { command } => {
+                let key = command.secret_key();
+                let value = rpassword::prompt_password(format!("{}: ", key.env_name()))?;
+                Secrets::set(&paths, key, &value)?;
+                println!("updated={}", key.env_name());
+                println!("path={}", paths.secrets_file.display());
+                println!("restart_required=true");
+                println!(
+                    "message=run `signalpane launch-agent restart` for a running daemon to pick up the change"
+                );
                 Ok(())
             }
         },
@@ -155,6 +210,14 @@ pub fn run() -> Result<()> {
                 print_launch_agent_status(&launch_agent::install(&paths)?);
                 Ok(())
             }
+            LaunchAgentCommand::Start => {
+                print_launch_agent_status(&launch_agent::start(&paths)?);
+                Ok(())
+            }
+            LaunchAgentCommand::Stop => {
+                print_launch_agent_status(&launch_agent::stop(&paths)?);
+                Ok(())
+            }
             LaunchAgentCommand::Uninstall => {
                 print_launch_agent_status(&launch_agent::uninstall(&paths)?);
                 Ok(())
@@ -173,6 +236,21 @@ pub fn run() -> Result<()> {
             }
         },
     }
+}
+
+fn format_secrets_check(secrets: &Secrets) -> String {
+    let mut output = String::new();
+    for key in SecretKey::ALL {
+        output.push_str(key.env_name());
+        output.push('=');
+        output.push_str(if secrets.value_for(key).is_some() {
+            "present"
+        } else {
+            "missing"
+        });
+        output.push('\n');
+    }
+    output
 }
 
 fn print_launch_agent_status(status: &LaunchAgentStatus) {
@@ -257,6 +335,68 @@ mod tests {
     }
 
     #[test]
+    fn parses_secrets_path_command() {
+        let cli = Cli::try_parse_from(["signalpane", "secrets", "path"]).expect("parse cli");
+
+        match cli.command {
+            Command::Secrets {
+                command: SecretsCommand::Path,
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_secrets_check_command() {
+        let cli = Cli::try_parse_from(["signalpane", "secrets", "check"]).expect("parse cli");
+
+        match cli.command {
+            Command::Secrets {
+                command: SecretsCommand::Check,
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_secrets_set_github_token_command() {
+        let cli = Cli::try_parse_from(["signalpane", "secrets", "set", "github-token"])
+            .expect("parse cli");
+
+        match cli.command {
+            Command::Secrets {
+                command:
+                    SecretsCommand::Set {
+                        command: SecretsSetCommand::GithubToken,
+                    },
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_secrets_check_without_values() {
+        let secrets = Secrets {
+            github_token: Some("ghp_secret".to_string()),
+            slack_user_token: None,
+            slack_user_id: Some("U123".to_string()),
+        };
+
+        let output = format_secrets_check(&secrets);
+
+        assert_eq!(
+            output,
+            concat!(
+                "SIGNALPANE_GITHUB_TOKEN=present\n",
+                "SIGNALPANE_SLACK_USER_TOKEN=missing\n",
+                "SIGNALPANE_SLACK_USER_ID=present\n",
+            )
+        );
+        assert!(!output.contains("ghp_secret"));
+        assert!(!output.contains("U123"));
+    }
+
+    #[test]
     fn parses_launch_agent_restart_command() {
         let cli =
             Cli::try_parse_from(["signalpane", "launch-agent", "restart"]).expect("parse cli");
@@ -264,6 +404,30 @@ mod tests {
         match cli.command {
             Command::LaunchAgent {
                 command: LaunchAgentCommand::Restart,
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_launch_agent_start_command() {
+        let cli = Cli::try_parse_from(["signalpane", "launch-agent", "start"]).expect("parse cli");
+
+        match cli.command {
+            Command::LaunchAgent {
+                command: LaunchAgentCommand::Start,
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_launch_agent_stop_command() {
+        let cli = Cli::try_parse_from(["signalpane", "launch-agent", "stop"]).expect("parse cli");
+
+        match cli.command {
+            Command::LaunchAgent {
+                command: LaunchAgentCommand::Stop,
             } => {}
             command => panic!("unexpected command: {command:?}"),
         }
