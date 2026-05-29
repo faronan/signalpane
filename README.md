@@ -231,7 +231,8 @@ binary_path=/Users/alice/.local/bin/signalpane
 `signalpane doctor` は config、secret の presence、LaunchAgent、daemon IPC、runtime path、registered binary path と current binary path の差分を key=value で出します。token 実値は出しません。
 
 ```text
-overall_status=ok
+overall_status=warning
+config_path=/Users/alice/.config/signalpane/config.toml
 config_exists=true
 config_parse=ok
 github_enabled=true
@@ -258,7 +259,7 @@ binary_path_match=true
 warning=slack is enabled but SIGNALPANE_SLACK_USER_ID is not present; runtime will resolve it with auth.test
 ```
 
-`overall_status=error` の場合、`signalpane doctor` は診断結果を stdout に出した後で exit code `1` を返します。Slack の `SIGNALPANE_SLACK_USER_ID` 未設定は、live API call なしでは確定できないため warning に留めます。
+`overall_status=warning` は exit code `0`、`overall_status=error` は診断結果を stdout に出した後で exit code `1` を返します。Slack の `SIGNALPANE_SLACK_USER_ID` 未設定は、live API call なしでは確定できないため warning に留めます。
 
 `signalpane status` の先頭行は安定しています。
 
