@@ -95,6 +95,11 @@ pushes and pull requests must run `cargo test`, `cargo fmt --check`, and
   the task explicitly asks for that scope.
 - Release assets are `signalpane-vX.Y.Z-aarch64-apple-darwin.tar.gz` and
   `SHA256SUMS`, uploaded to a published GitHub Release.
+- Before publishing a GitHub Release, the workflow must smoke the generated
+  tarball by extracting it and running only network-free, token-free,
+  non-destructive commands from the packaged binary. Keep this smoke limited to
+  artifact executability, version/help output, and user-level LaunchAgent status
+  checks unless a follow-up task explicitly expands the release gate.
 - The binary install/update flow uses `~/.local/bin/signalpane` and must not
   write config, secrets, database, socket, read state, or logs outside the paths
   documented in this file.
