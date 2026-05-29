@@ -16,9 +16,15 @@ use crate::{
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcRequest {
     Status,
-    ListEvents { unread_only: bool, limit: usize },
+    ListEvents {
+        unread_only: bool,
+        source: Option<String>,
+        limit: usize,
+    },
     Sources,
-    MarkRead { id: i64 },
+    MarkRead {
+        id: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,8 +54,17 @@ impl IpcClient {
         }
     }
 
-    pub fn list_events(&self, unread_only: bool, limit: usize) -> Result<Vec<Event>> {
-        match self.send(&IpcRequest::ListEvents { unread_only, limit })? {
+    pub fn list_events(
+        &self,
+        unread_only: bool,
+        source: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        match self.send(&IpcRequest::ListEvents {
+            unread_only,
+            source,
+            limit,
+        })? {
             IpcResponse::Events { events } => Ok(events),
             other => bail!("unexpected IPC response: {other:?}"),
         }
@@ -103,8 +118,12 @@ fn handle_request_result(db_path: &Path, request: IpcRequest) -> Result<IpcRespo
         IpcRequest::Status => Ok(IpcResponse::Status {
             status: store.app_status()?,
         }),
-        IpcRequest::ListEvents { unread_only, limit } => Ok(IpcResponse::Events {
-            events: store.list_events(unread_only, limit)?,
+        IpcRequest::ListEvents {
+            unread_only,
+            source,
+            limit,
+        } => Ok(IpcResponse::Events {
+            events: store.list_events(unread_only, source.as_deref(), limit)?,
         }),
         IpcRequest::Sources => Ok(IpcResponse::Sources {
             sources: store.source_statuses()?,
@@ -204,6 +223,77 @@ mod tests {
             Some("GitHub collector timed out")
         );
         assert_eq!(sources[0].consecutive_failures, 1);
+    }
+
+    #[test]
+    fn list_events_filters_by_source_and_read_state() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("signalpane.sqlite3");
+        let store = Store::open(&db_path).expect("store");
+        let github_account = store
+            .upsert_account("github", "GitHub", "default", true, &serde_json::json!({}))
+            .expect("github account");
+        let slack_account = store
+            .upsert_account("slack", "Slack", "default", true, &serde_json::json!({}))
+            .expect("slack account");
+        let github_id = store
+            .upsert_event(&EventDraft {
+                source: "github".to_string(),
+                account_id: github_account,
+                external_id: "gh-1".to_string(),
+                title: "GitHub mention".to_string(),
+                body: None,
+                url: None,
+                actor: Some("octocat".to_string()),
+                reason: Some("mention".to_string()),
+                occurred_at: Utc.with_ymd_and_hms(2026, 5, 26, 1, 2, 3).single().unwrap(),
+                raw_json: serde_json::json!({"id": "gh-1"}),
+            })
+            .expect("github event");
+        store
+            .upsert_event(&EventDraft {
+                source: "slack".to_string(),
+                account_id: slack_account,
+                external_id: "slack-1".to_string(),
+                title: "Slack mention".to_string(),
+                body: None,
+                url: None,
+                actor: Some("U123".to_string()),
+                reason: Some("mention".to_string()),
+                occurred_at: Utc.with_ymd_and_hms(2026, 5, 26, 1, 3, 3).single().unwrap(),
+                raw_json: serde_json::json!({"ts": "1779757383.000100"}),
+            })
+            .expect("slack event");
+        assert!(store.mark_read(github_id).expect("mark github read"));
+
+        let unread = handle_request(
+            &db_path,
+            IpcRequest::ListEvents {
+                unread_only: true,
+                source: None,
+                limit: 10,
+            },
+        );
+        let IpcResponse::Events { events } = unread else {
+            panic!("unexpected unread response");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, "slack");
+
+        let github = handle_request(
+            &db_path,
+            IpcRequest::ListEvents {
+                unread_only: false,
+                source: Some("github".to_string()),
+                limit: 10,
+            },
+        );
+        let IpcResponse::Events { events } = github else {
+            panic!("unexpected github response");
+        };
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].source, "github");
+        assert!(events[0].read_at.is_some());
     }
 
     #[test]

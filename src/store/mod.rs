@@ -157,27 +157,23 @@ impl Store {
             .context("failed to fetch upserted event id")
     }
 
-    pub fn list_events(&self, unread_only: bool, limit: usize) -> Result<Vec<Event>> {
-        let sql = if unread_only {
-            r#"
+    pub fn list_events(
+        &self,
+        unread_only: bool,
+        source: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        let sql = r#"
             SELECT id, source, account_id, external_id, title, body, url, actor, reason,
                    occurred_at, received_at, read_at, raw_json
             FROM events
-            WHERE read_at IS NULL
+            WHERE (?1 = 0 OR read_at IS NULL)
+              AND (?2 IS NULL OR source = ?2)
             ORDER BY occurred_at DESC
-            LIMIT ?1
-            "#
-        } else {
-            r#"
-            SELECT id, source, account_id, external_id, title, body, url, actor, reason,
-                   occurred_at, received_at, read_at, raw_json
-            FROM events
-            ORDER BY occurred_at DESC
-            LIMIT ?1
-            "#
-        };
+            LIMIT ?3
+            "#;
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![limit as i64], event_from_row)?;
+        let rows = stmt.query_map(params![unread_only, source, limit as i64], event_from_row)?;
         collect_rows(rows)
     }
 
@@ -544,7 +540,7 @@ mod tests {
             )
             .expect("cursor");
 
-        assert_eq!(store.list_events(true, 10).expect("events").len(), 1);
+        assert_eq!(store.list_events(true, None, 10).expect("events").len(), 1);
         assert_eq!(
             store.get_cursor("github", "notifications").expect("cursor"),
             Some("Tue, 26 May 2026 01:02:03 GMT".to_string())
@@ -557,7 +553,63 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 5, 26, 1, 3, 3).single().unwrap())
         );
         assert!(store.mark_read(id).expect("mark read"));
-        assert!(store.list_events(true, 10).expect("events").is_empty());
+        assert!(
+            store
+                .list_events(true, None, 10)
+                .expect("events")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn list_events_filters_by_source_and_read_state() {
+        let store = Store::open_in_memory().expect("store");
+        let github_account = store
+            .upsert_account("github", "GitHub", "default", true, &serde_json::json!({}))
+            .expect("github account");
+        let slack_account = store
+            .upsert_account("slack", "Slack", "default", true, &serde_json::json!({}))
+            .expect("slack account");
+        let github_id = store
+            .upsert_event(&EventDraft {
+                source: "github".to_string(),
+                account_id: github_account,
+                external_id: "gh-1".to_string(),
+                title: "GitHub mention".to_string(),
+                body: None,
+                url: None,
+                actor: None,
+                reason: Some("mention".to_string()),
+                occurred_at: Utc.with_ymd_and_hms(2026, 5, 26, 1, 2, 3).single().unwrap(),
+                raw_json: serde_json::json!({"id": "gh-1"}),
+            })
+            .expect("github event");
+        store
+            .upsert_event(&EventDraft {
+                source: "slack".to_string(),
+                account_id: slack_account,
+                external_id: "slack-1".to_string(),
+                title: "Slack mention".to_string(),
+                body: None,
+                url: None,
+                actor: None,
+                reason: Some("mention".to_string()),
+                occurred_at: Utc.with_ymd_and_hms(2026, 5, 26, 1, 3, 3).single().unwrap(),
+                raw_json: serde_json::json!({"ts": "1779757383.000100"}),
+            })
+            .expect("slack event");
+        assert!(store.mark_read(github_id).expect("mark github read"));
+
+        let unread = store.list_events(true, None, 10).expect("unread events");
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].source, "slack");
+
+        let github = store
+            .list_events(false, Some("github"), 10)
+            .expect("github events");
+        assert_eq!(github.len(), 1);
+        assert_eq!(github[0].source, "github");
+        assert!(github[0].read_at.is_some());
     }
 
     #[test]
