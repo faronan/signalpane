@@ -71,6 +71,11 @@ jobs:
           smoke_config="$(mktemp -d)"
           smoke_state="$(mktemp -d)"
 
+          (
+            cd dist
+            shasum -a 256 -c SHA256SUMS
+          )
+
           tar -xzf "dist/${ASSET_BASE}.tar.gz" -C "${smoke_dir}"
 
           binary="${smoke_dir}/signalpane"

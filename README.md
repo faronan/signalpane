@@ -307,6 +307,6 @@ cargo clippy --all-targets -- -D warnings
 
 Release binary は Apple Silicon Mac 向けです。現時点では notarized macOS app bundle ではありません。
 
-GitHub Release を publish する前に、release workflow は macOS Apple Silicon runner で tarball smoke を実行します。artifact を展開し、binary が executable であること、`signalpane --help`、`signalpane --version`、isolated config/state での `signalpane launch-agent status` を確認します。
+GitHub Release を publish する前に、release workflow は macOS Apple Silicon runner で tarball smoke を実行します。`SHA256SUMS` を検証し、artifact を展開し、binary が executable であること、`signalpane --help`、`signalpane --version`、isolated config/state での `signalpane launch-agent status` を確認します。
 
 この smoke test は distribution binary の最小実行性だけを確認します。local install path、shell `PATH`、macOS quarantine、daemon IPC、live GitHub / Slack collectors、tokens、network access、Homebrew、self-update、SLSA、SBOM は保証しません。
