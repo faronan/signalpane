@@ -2,6 +2,7 @@ pub mod cli;
 pub mod collectors;
 pub mod config;
 pub mod daemon;
+pub mod doctor;
 pub mod ipc;
 pub mod launch_agent;
 pub mod model;

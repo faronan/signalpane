@@ -18,6 +18,7 @@ signalpane config list
 signalpane daemon --foreground
 signalpane tui
 signalpane status
+signalpane doctor
 signalpane sources
 signalpane mark-read <id>
 signalpane launch-agent install
@@ -219,6 +220,38 @@ binary_path=/Users/alice/.local/bin/signalpane
 `loaded=false` かつ `daemon_ipc=responsive` の場合は、foreground の `signalpane daemon --foreground` が socket を掴んでいます。その daemon を止めてから `signalpane launch-agent install` または `signalpane launch-agent restart` を実行してください。
 
 ## Diagnostics
+
+`signalpane doctor` は config、secret の presence、LaunchAgent、daemon IPC、runtime path、registered binary path と current binary path の差分を key=value で出します。token 実値は出しません。
+
+```text
+overall_status=ok
+config_exists=true
+config_parse=ok
+github_enabled=true
+github_token_present=true
+github_status=ok
+slack_enabled=true
+slack_user_token_present=true
+slack_user_id_present=false
+slack_status=warning
+launch_agent_status=ok
+launch_agent_loaded=true
+daemon_ipc=responsive
+socket_path=/Users/alice/.local/state/signalpane/signalpane.sock
+socket_exists=true
+log_path=/Users/alice/.local/state/signalpane/logs/daemon.log
+log_exists=true
+db_path=/Users/alice/.local/state/signalpane/signalpane.sqlite3
+db_exists=true
+plist_path=/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist
+plist_exists=true
+registered_binary_path=/Users/alice/.local/bin/signalpane
+current_binary_path=/Users/alice/.local/bin/signalpane
+binary_path_match=true
+warning=slack is enabled but SIGNALPANE_SLACK_USER_ID is not present; runtime will resolve it with auth.test
+```
+
+`overall_status=error` の場合、`signalpane doctor` は診断結果を stdout に出した後で exit code `1` を返します。Slack の `SIGNALPANE_SLACK_USER_ID` 未設定は、live API call なしでは確定できないため warning に留めます。
 
 `signalpane status` の先頭行は安定しています。
 
