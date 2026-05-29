@@ -5,6 +5,8 @@ Local developer notification hub for GitHub and Slack mentions.
 ## MVP commands
 
 ```sh
+signalpane config init
+signalpane config list
 signalpane daemon --foreground
 signalpane tui
 signalpane status
@@ -116,35 +118,30 @@ Do not store tokens in this repository or in `config.toml`.
 
 ## Setup config
 
-The MVP reads config from `~/.config/signalpane/config.toml`. The daemon creates
-the config directory if needed, but it does not generate a config file yet.
-Create one manually after installing the binary:
-
-```sh
-mkdir -p ~/.config/signalpane
-printf '%s\n' \
-  '[github]' \
-  'enabled = true' \
-  'poll_interval_seconds = 60' \
-  '' \
-  '[slack]' \
-  'enabled = true' \
-  'channels = ["C0123456789"]' \
-  'poll_interval_seconds = 60' \
-  > ~/.config/signalpane/config.toml
-```
-
-Replace `C0123456789` with the Slack channel IDs that signalpane should poll.
-Config changes are read when `signalpane daemon --foreground` starts, so restart
-the foreground daemon after editing this file.
-
-Future setup commands are planned, but not part of the current MVP:
+The MVP reads config from `~/.config/signalpane/config.toml`. Create the default
+config file after installing the binary:
 
 ```sh
 signalpane config init
-signalpane config set slack.channels C0123456789
+```
+
+`config init` creates `~/.config/signalpane/config.toml` and refuses to
+overwrite an existing file. Inspect the normalized config with:
+
+```sh
 signalpane config list
 ```
+
+Edit `~/.config/signalpane/config.toml` to add the Slack channel IDs that
+signalpane should poll:
+
+```toml
+[slack]
+channels = ["C0123456789"]
+```
+
+Config changes are read when `signalpane daemon --foreground` starts, so restart
+the foreground daemon after editing this file.
 
 ## Foreground daemon diagnostics
 

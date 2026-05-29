@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -120,6 +121,33 @@ impl Config {
             .with_context(|| format!("failed to read {}", path.display()))?;
         toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
     }
+
+    pub fn init_file(path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        file.write_all(Self::default_toml()?.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
+    }
+
+    pub fn default_toml() -> Result<String> {
+        Self::default().to_toml()
+    }
+
+    pub fn to_toml(&self) -> Result<String> {
+        let mut rendered = toml::to_string_pretty(self).context("failed to render config")?;
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        Ok(rendered)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,8 +195,88 @@ mod tests {
 
     #[test]
     fn config_defaults_do_not_contain_secret_fields() {
-        let rendered = toml::to_string(&Config::default()).expect("serialize default config");
+        let rendered = Config::default_toml().expect("serialize default config");
         assert!(!rendered.contains("token"));
         assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("SIGNALPANE_"));
+    }
+
+    #[test]
+    fn partial_config_loads_with_defaults() {
+        let config: Config = toml::from_str(
+            r#"
+[slack]
+channels = ["C0123456789"]
+"#,
+        )
+        .expect("parse partial config");
+
+        assert_eq!(config.github, GithubConfig::default());
+        assert!(config.slack.enabled);
+        assert_eq!(config.slack.channels, vec!["C0123456789"]);
+        assert_eq!(config.slack.poll_interval_seconds, 60);
+    }
+
+    #[test]
+    fn init_file_creates_default_config_without_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("signalpane").join("config.toml");
+
+        Config::init_file(&path).expect("init config");
+
+        let rendered = fs::read_to_string(path).expect("read config");
+        assert_eq!(
+            toml::from_str::<Config>(&rendered).expect("parse config"),
+            Config::default()
+        );
+        assert!(rendered.contains("[github]"));
+        assert!(rendered.contains("[slack]"));
+        assert!(!rendered.contains("token"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("SIGNALPANE_"));
+    }
+
+    #[test]
+    fn init_file_does_not_overwrite_existing_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "existing = true\n").expect("write existing config");
+
+        let err = Config::init_file(&path).expect_err("existing config should fail");
+
+        assert!(
+            err.to_string().contains("failed to create"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(path).expect("read existing config"),
+            "existing = true\n"
+        );
+    }
+
+    #[test]
+    fn rendered_config_does_not_echo_unknown_secret_like_keys() {
+        let config: Config = toml::from_str(
+            r#"
+github_token = "top-level-token"
+
+[github]
+enabled = false
+token = "github-token"
+
+[slack]
+channels = ["C0123456789"]
+secret = "slack-secret"
+"#,
+        )
+        .expect("parse config with unknown keys");
+
+        let rendered = config.to_toml().expect("render config");
+
+        assert!(rendered.contains("enabled = false"));
+        assert!(rendered.contains(r#"channels = ["C0123456789"]"#));
+        assert!(!rendered.contains("token"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("SIGNALPANE_"));
     }
 }

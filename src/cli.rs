@@ -27,6 +27,10 @@ enum Command {
         #[arg(long)]
         foreground: bool,
     },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     Tui,
     Status,
     Sources,
@@ -46,6 +50,12 @@ enum LaunchAgentCommand {
     Status,
 }
 
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Init,
+    List,
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = AppPaths::from_env()?;
@@ -59,6 +69,18 @@ pub fn run() -> Result<()> {
             let secrets = Secrets::from_env();
             daemon::run_foreground(paths, config, secrets)
         }
+        Command::Config { command } => match command {
+            ConfigCommand::Init => {
+                Config::init_file(&paths.config_file)?;
+                println!("created={}", paths.config_file.display());
+                Ok(())
+            }
+            ConfigCommand::List => {
+                let config = Config::load(&paths.config_file)?;
+                print!("{}", config.to_toml()?);
+                Ok(())
+            }
+        },
         Command::Tui => tui::run(paths.socket_file),
         Command::Status => {
             let status = IpcClient::new(paths.socket_file.clone()).status()?;
@@ -147,4 +169,33 @@ fn sanitize_cli_value(value: &str) -> String {
             ch => ch,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_config_init_command() {
+        let cli = Cli::try_parse_from(["signalpane", "config", "init"]).expect("parse cli");
+
+        match cli.command {
+            Command::Config {
+                command: ConfigCommand::Init,
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_config_list_command() {
+        let cli = Cli::try_parse_from(["signalpane", "config", "list"]).expect("parse cli");
+
+        match cli.command {
+            Command::Config {
+                command: ConfigCommand::List,
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
 }
