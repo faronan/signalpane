@@ -76,6 +76,13 @@ signalpane launch-agent status
 
 更新時は、新しい release tag で download、checksum、extract、`install` を繰り返します。更新で置き換わるのは `~/.local/bin/signalpane` だけです。config、secret、database、socket、read state、log は変更されません。
 
+LaunchAgent を使っている場合は、binary 更新後に daemon を再起動して新しい binary を読み込ませます。
+
+```sh
+signalpane launch-agent restart
+signalpane doctor
+```
+
 ## Runtime locations
 
 - Config: `~/.config/signalpane/config.toml`
