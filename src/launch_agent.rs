@@ -4,9 +4,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
-use crate::{config::AppPaths, ipc::IpcClient};
+use crate::config::AppPaths;
+#[cfg(target_os = "macos")]
+use crate::ipc::IpcClient;
 
 pub const LABEL: &str = "com.faronan.signalpane";
 const PLIST_FILE_NAME: &str = "com.faronan.signalpane.plist";
@@ -162,6 +164,7 @@ fn read_log_tail(log_path: &Path, lines: usize) -> Result<LaunchAgentLogs> {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn build_status(
     paths: &AppPaths,
     plist_path: PathBuf,
@@ -198,11 +201,13 @@ fn build_status(
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn registered_binary_path_from_file(plist_path: &Path) -> Option<PathBuf> {
     let plist = fs::read_to_string(plist_path).ok()?;
     registered_binary_path_from_plist(&plist).map(PathBuf::from)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn registered_binary_path_from_plist(plist: &str) -> Option<String> {
     let mut in_program_arguments = false;
     for line in plist.lines().map(str::trim) {
@@ -221,11 +226,13 @@ fn registered_binary_path_from_plist(plist: &str) -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn plist_string_value(line: &str) -> Option<String> {
     let value = line.strip_prefix("<string>")?.strip_suffix("</string>")?;
     Some(value.to_string())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn unescape_plist_string(value: &str) -> String {
     let mut unescaped = String::with_capacity(value.len());
     let mut rest = value;
@@ -252,6 +259,7 @@ fn unescape_plist_string(value: &str) -> String {
     unescaped
 }
 
+#[cfg(target_os = "macos")]
 fn probe_daemon_ipc(socket_path: &Path) -> DaemonIpcStatus {
     if IpcClient::new(socket_path.to_path_buf()).status().is_ok() {
         DaemonIpcStatus::Responsive
@@ -260,17 +268,19 @@ fn probe_daemon_ipc(socket_path: &Path) -> DaemonIpcStatus {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn foreground_socket_conflict(loaded: bool, daemon_ipc: DaemonIpcStatus) -> bool {
     !loaded && daemon_ipc == DaemonIpcStatus::Responsive
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn ensure_no_foreground_socket_conflict(
     loaded: bool,
     daemon_ipc: DaemonIpcStatus,
     socket_path: &Path,
 ) -> Result<()> {
     if foreground_socket_conflict(loaded, daemon_ipc) {
-        bail!(
+        anyhow::bail!(
             "foreground daemon appears to be running at {}; stop it before launch-agent install or restart",
             socket_path.display()
         );
