@@ -1,11 +1,12 @@
 use std::{
-    env,
+    env, fs,
+    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::config::AppPaths;
+use crate::{config::AppPaths, ipc::IpcClient};
 
 pub const LABEL: &str = "com.faronan.signalpane";
 const PLIST_FILE_NAME: &str = "com.faronan.signalpane.plist";
@@ -13,20 +14,55 @@ const PLIST_FILE_NAME: &str = "com.faronan.signalpane.plist";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchAgentStatus {
     pub label: &'static str,
-    pub plist_path: PathBuf,
     pub loaded: bool,
+    pub daemon_ipc: DaemonIpcStatus,
+    pub socket_path: PathBuf,
+    pub log_path: PathBuf,
+    pub plist_path: PathBuf,
+    pub binary_path: PathBuf,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonIpcStatus {
+    Responsive,
+    Unreachable,
+}
+
+impl DaemonIpcStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Responsive => "responsive",
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchAgentLogs {
+    pub log_path: PathBuf,
+    pub exists: bool,
+    pub content: String,
 }
 
 pub fn install(paths: &AppPaths) -> Result<LaunchAgentStatus> {
     platform::install(paths)
 }
 
-pub fn uninstall() -> Result<LaunchAgentStatus> {
-    platform::uninstall()
+pub fn uninstall(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+    platform::uninstall(paths)
 }
 
-pub fn status() -> Result<LaunchAgentStatus> {
-    platform::status()
+pub fn status(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+    platform::status(paths)
+}
+
+pub fn restart(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+    platform::restart(paths)
+}
+
+pub fn logs(paths: &AppPaths, lines: usize) -> Result<LaunchAgentLogs> {
+    read_log_tail(&paths.daemon_log, lines)
 }
 
 pub fn launch_agent_path_from_home(home: &Path) -> PathBuf {
@@ -88,12 +124,166 @@ fn escape_plist_string(value: &str) -> String {
     escaped
 }
 
+fn read_log_tail(log_path: &Path, lines: usize) -> Result<LaunchAgentLogs> {
+    let file = match fs::File::open(log_path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LaunchAgentLogs {
+                log_path: log_path.to_path_buf(),
+                exists: false,
+                content: String::new(),
+            });
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", log_path.display()));
+        }
+    };
+
+    let mut tail = std::collections::VecDeque::new();
+    for line in BufReader::new(file).lines() {
+        if lines == 0 {
+            break;
+        }
+        if tail.len() == lines {
+            tail.pop_front();
+        }
+        tail.push_back(line?);
+    }
+
+    let mut content = tail.into_iter().collect::<Vec<_>>().join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+
+    Ok(LaunchAgentLogs {
+        log_path: log_path.to_path_buf(),
+        exists: true,
+        content,
+    })
+}
+
+fn build_status(
+    paths: &AppPaths,
+    plist_path: PathBuf,
+    loaded: bool,
+    current_binary_path: PathBuf,
+    daemon_ipc: DaemonIpcStatus,
+) -> LaunchAgentStatus {
+    let binary_path = registered_binary_path_from_file(&plist_path)
+        .unwrap_or_else(|| current_binary_path.clone());
+    let mut warnings = Vec::new();
+
+    if binary_path != current_binary_path {
+        warnings.push(format!(
+            "registered binary differs from current executable: current={}",
+            current_binary_path.display()
+        ));
+    }
+    if foreground_socket_conflict(loaded, daemon_ipc) {
+        warnings.push(format!(
+            "foreground daemon appears to be running at {}; stop it before launch-agent install or restart",
+            paths.socket_file.display()
+        ));
+    }
+
+    LaunchAgentStatus {
+        label: LABEL,
+        loaded,
+        daemon_ipc,
+        socket_path: paths.socket_file.clone(),
+        log_path: paths.daemon_log.clone(),
+        plist_path,
+        binary_path,
+        warnings,
+    }
+}
+
+fn registered_binary_path_from_file(plist_path: &Path) -> Option<PathBuf> {
+    let plist = fs::read_to_string(plist_path).ok()?;
+    registered_binary_path_from_plist(&plist).map(PathBuf::from)
+}
+
+fn registered_binary_path_from_plist(plist: &str) -> Option<String> {
+    let mut in_program_arguments = false;
+    for line in plist.lines().map(str::trim) {
+        if line == "<key>ProgramArguments</key>" {
+            in_program_arguments = true;
+            continue;
+        }
+        if !in_program_arguments || line == "<array>" {
+            continue;
+        }
+        if line == "</array>" {
+            return None;
+        }
+        return plist_string_value(line).map(|value| unescape_plist_string(&value));
+    }
+    None
+}
+
+fn plist_string_value(line: &str) -> Option<String> {
+    let value = line.strip_prefix("<string>")?.strip_suffix("</string>")?;
+    Some(value.to_string())
+}
+
+fn unescape_plist_string(value: &str) -> String {
+    let mut unescaped = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(index) = rest.find('&') {
+        unescaped.push_str(&rest[..index]);
+        rest = &rest[index..];
+        let Some(end) = rest.find(';') else {
+            unescaped.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        let entity = &rest[..=end];
+        match entity {
+            "&amp;" => unescaped.push('&'),
+            "&lt;" => unescaped.push('<'),
+            "&gt;" => unescaped.push('>'),
+            "&quot;" => unescaped.push('"'),
+            "&apos;" => unescaped.push('\''),
+            _ => unescaped.push_str(entity),
+        }
+        rest = &rest[end + 1..];
+    }
+    unescaped.push_str(rest);
+    unescaped
+}
+
+fn probe_daemon_ipc(socket_path: &Path) -> DaemonIpcStatus {
+    if IpcClient::new(socket_path.to_path_buf()).status().is_ok() {
+        DaemonIpcStatus::Responsive
+    } else {
+        DaemonIpcStatus::Unreachable
+    }
+}
+
+fn foreground_socket_conflict(loaded: bool, daemon_ipc: DaemonIpcStatus) -> bool {
+    !loaded && daemon_ipc == DaemonIpcStatus::Responsive
+}
+
+fn ensure_no_foreground_socket_conflict(
+    loaded: bool,
+    daemon_ipc: DaemonIpcStatus,
+    socket_path: &Path,
+) -> Result<()> {
+    if foreground_socket_conflict(loaded, daemon_ipc) {
+        bail!(
+            "foreground daemon appears to be running at {}; stop it before launch-agent install or restart",
+            socket_path.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use std::{
         ffi::OsStr,
         fs, io,
-        path::Path,
+        path::{Path, PathBuf},
         process::{Command, Output},
     };
 
@@ -101,7 +291,10 @@ mod platform {
 
     use crate::config::AppPaths;
 
-    use super::{LABEL, LaunchAgentStatus, launch_agent_path_from_env, render_plist};
+    use super::{
+        LABEL, LaunchAgentStatus, build_status, ensure_no_foreground_socket_conflict,
+        launch_agent_path_from_env, probe_daemon_ipc, render_plist,
+    };
 
     pub fn install(paths: &AppPaths) -> Result<LaunchAgentStatus> {
         paths.ensure_dirs()?;
@@ -112,37 +305,55 @@ mod platform {
         fs::create_dir_all(plist_dir)
             .with_context(|| format!("failed to create {}", plist_dir.display()))?;
 
+        let launchctl = SystemLaunchctl;
+        let service_target = service_target()?;
+        let loaded = is_loaded_with(&launchctl, &service_target)?;
+        let daemon_ipc = probe_daemon_ipc(&paths.socket_file);
+        ensure_no_foreground_socket_conflict(loaded, daemon_ipc, &paths.socket_file)?;
+
         let program_path =
             std::env::current_exe().context("failed to resolve current executable")?;
         let plist = render_plist(&program_path, paths);
         fs::write(&plist_path, plist)
             .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
-        let launchctl = SystemLaunchctl;
-        let service_target = service_target()?;
-        bootout_if_loaded(&launchctl, &service_target)?;
+        if loaded {
+            bootout_loaded(&launchctl, &service_target)?;
+        }
         let domain = gui_domain()?;
         let output = launchctl.bootstrap(&domain, &plist_path)?;
         ensure_success(output, "launchctl bootstrap")?;
 
-        Ok(LaunchAgentStatus {
-            label: LABEL,
+        Ok(build_status(
+            paths,
             plist_path,
-            loaded: true,
-        })
+            true,
+            program_path,
+            probe_daemon_ipc(&paths.socket_file),
+        ))
     }
 
-    pub fn uninstall() -> Result<LaunchAgentStatus> {
+    pub fn uninstall(paths: &AppPaths) -> Result<LaunchAgentStatus> {
         let plist_path = launch_agent_path_from_env()?;
         let service_target = service_target()?;
         let launchctl = SystemLaunchctl;
-        uninstall_with(plist_path, &service_target, &launchctl)
+        let current_binary_path =
+            std::env::current_exe().context("failed to resolve current executable")?;
+        uninstall_with(
+            paths,
+            plist_path,
+            &service_target,
+            &launchctl,
+            current_binary_path,
+        )
     }
 
     fn uninstall_with(
+        paths: &AppPaths,
         plist_path: std::path::PathBuf,
         service_target: &str,
         launchctl: &impl Launchctl,
+        current_binary_path: PathBuf,
     ) -> Result<LaunchAgentStatus> {
         bootout_if_loaded(launchctl, service_target)?;
 
@@ -155,20 +366,77 @@ mod platform {
             }
         }
 
-        Ok(LaunchAgentStatus {
-            label: LABEL,
+        Ok(build_status(
+            paths,
             plist_path,
-            loaded: false,
-        })
+            false,
+            current_binary_path,
+            probe_daemon_ipc(&paths.socket_file),
+        ))
     }
 
-    pub fn status() -> Result<LaunchAgentStatus> {
+    pub fn status(paths: &AppPaths) -> Result<LaunchAgentStatus> {
         let plist_path = launch_agent_path_from_env()?;
-        Ok(LaunchAgentStatus {
-            label: LABEL,
+        let current_binary_path =
+            std::env::current_exe().context("failed to resolve current executable")?;
+        Ok(build_status(
+            paths,
             plist_path,
-            loaded: is_loaded(&SystemLaunchctl)?,
-        })
+            is_loaded(&SystemLaunchctl)?,
+            current_binary_path,
+            probe_daemon_ipc(&paths.socket_file),
+        ))
+    }
+
+    pub fn restart(paths: &AppPaths) -> Result<LaunchAgentStatus> {
+        paths.ensure_dirs()?;
+        let plist_path = launch_agent_path_from_env()?;
+        let domain = gui_domain()?;
+        let service_target = service_target()?;
+        let current_binary_path =
+            std::env::current_exe().context("failed to resolve current executable")?;
+        restart_with(
+            paths,
+            plist_path,
+            &domain,
+            &service_target,
+            &SystemLaunchctl,
+            current_binary_path,
+        )
+    }
+
+    fn restart_with(
+        paths: &AppPaths,
+        plist_path: PathBuf,
+        domain: &str,
+        service_target: &str,
+        launchctl: &impl Launchctl,
+        current_binary_path: PathBuf,
+    ) -> Result<LaunchAgentStatus> {
+        if !plist_path.exists() {
+            bail!(
+                "LaunchAgent plist does not exist at {}; run `signalpane launch-agent install` first",
+                plist_path.display()
+            );
+        }
+
+        let loaded = is_loaded_with(launchctl, service_target)?;
+        let daemon_ipc = probe_daemon_ipc(&paths.socket_file);
+        ensure_no_foreground_socket_conflict(loaded, daemon_ipc, &paths.socket_file)?;
+
+        if loaded {
+            bootout_loaded(launchctl, service_target)?;
+        }
+        let output = launchctl.bootstrap(domain, &plist_path)?;
+        ensure_success(output, "launchctl bootstrap")?;
+
+        Ok(build_status(
+            paths,
+            plist_path,
+            true,
+            current_binary_path,
+            probe_daemon_ipc(&paths.socket_file),
+        ))
     }
 
     trait Launchctl {
@@ -221,8 +489,11 @@ mod platform {
         if !is_loaded_with(launchctl, service_target)? {
             return Ok(());
         }
-        let output = launchctl.bootout(service_target)?;
-        ensure_bootout_success(output)
+        bootout_loaded(launchctl, service_target)
+    }
+
+    fn bootout_loaded(launchctl: &impl Launchctl, service_target: &str) -> Result<()> {
+        ensure_bootout_success(launchctl.bootout(service_target)?)
     }
 
     fn ensure_bootout_success(output: Output) -> Result<()> {
@@ -302,14 +573,22 @@ mod platform {
         struct FakeLaunchctl {
             print_output: RefCell<Option<Output>>,
             bootout_output: RefCell<Option<Output>>,
+            bootstrap_output: RefCell<Option<Output>>,
+            calls: RefCell<Vec<String>>,
         }
 
         impl Launchctl for FakeLaunchctl {
-            fn print(&self, _service_target: &str) -> Result<Output> {
+            fn print(&self, service_target: &str) -> Result<Output> {
+                self.calls
+                    .borrow_mut()
+                    .push(format!("print {service_target}"));
                 Ok(self.print_output.borrow_mut().take().expect("print output"))
             }
 
-            fn bootout(&self, _service_target: &str) -> Result<Output> {
+            fn bootout(&self, service_target: &str) -> Result<Output> {
+                self.calls
+                    .borrow_mut()
+                    .push(format!("bootout {service_target}"));
                 Ok(self
                     .bootout_output
                     .borrow_mut()
@@ -317,8 +596,15 @@ mod platform {
                     .expect("bootout output"))
             }
 
-            fn bootstrap(&self, _domain: &str, _plist_path: &std::path::Path) -> Result<Output> {
-                panic!("bootstrap should not be called")
+            fn bootstrap(&self, domain: &str, plist_path: &std::path::Path) -> Result<Output> {
+                self.calls
+                    .borrow_mut()
+                    .push(format!("bootstrap {domain} {}", plist_path.display()));
+                Ok(self
+                    .bootstrap_output
+                    .borrow_mut()
+                    .take()
+                    .expect("bootstrap output"))
             }
         }
 
@@ -353,12 +639,17 @@ mod platform {
             let launchctl = FakeLaunchctl {
                 print_output: RefCell::new(Some(command_output(0, "service = true\n", ""))),
                 bootout_output: RefCell::new(Some(command_output(5, "", "Input/output error\n"))),
+                bootstrap_output: RefCell::new(None),
+                calls: RefCell::new(Vec::new()),
             };
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
 
             let err = uninstall_with(
+                &paths,
                 plist_path.clone(),
                 "gui/501/com.faronan.signalpane",
                 &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
             )
             .expect_err("uninstall should fail");
 
@@ -367,6 +658,72 @@ mod platform {
                 "unexpected error: {err:#}"
             );
             assert!(plist_path.exists());
+        }
+
+        #[test]
+        fn restart_bootouts_loaded_service_then_bootstraps_existing_plist() {
+            let dir = tempdir().expect("tempdir");
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+            let plist_path = dir.path().join("com.faronan.signalpane.plist");
+            fs::write(
+                &plist_path,
+                render_plist(Path::new("/Users/alice/.local/bin/signalpane"), &paths),
+            )
+            .expect("write plist");
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(Some(command_output(0, "service = true\n", ""))),
+                bootout_output: RefCell::new(Some(command_output(0, "", ""))),
+                bootstrap_output: RefCell::new(Some(command_output(0, "", ""))),
+                calls: RefCell::new(Vec::new()),
+            };
+
+            restart_with(
+                &paths,
+                plist_path.clone(),
+                "gui/501",
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            )
+            .expect("restart");
+
+            assert_eq!(
+                launchctl.calls.borrow().as_slice(),
+                &[
+                    "print gui/501/com.faronan.signalpane",
+                    "bootout gui/501/com.faronan.signalpane",
+                    &format!("bootstrap gui/501 {}", plist_path.display()),
+                ]
+            );
+        }
+
+        #[test]
+        fn restart_requires_existing_plist() {
+            let dir = tempdir().expect("tempdir");
+            let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+            let launchctl = FakeLaunchctl {
+                print_output: RefCell::new(None),
+                bootout_output: RefCell::new(None),
+                bootstrap_output: RefCell::new(None),
+                calls: RefCell::new(Vec::new()),
+            };
+
+            let err = restart_with(
+                &paths,
+                dir.path().join("missing.plist"),
+                "gui/501",
+                "gui/501/com.faronan.signalpane",
+                &launchctl,
+                PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            )
+            .expect_err("missing plist should fail");
+
+            assert!(
+                err.to_string()
+                    .contains("run `signalpane launch-agent install` first"),
+                "unexpected error: {err:#}"
+            );
+            assert!(launchctl.calls.borrow().is_empty());
         }
 
         fn command_output(code: i32, stdout: &str, stderr: &str) -> Output {
@@ -391,18 +748,25 @@ mod platform {
         bail!("signalpane launch-agent is macOS only")
     }
 
-    pub fn uninstall() -> Result<LaunchAgentStatus> {
+    pub fn uninstall(_paths: &AppPaths) -> Result<LaunchAgentStatus> {
         bail!("signalpane launch-agent is macOS only")
     }
 
-    pub fn status() -> Result<LaunchAgentStatus> {
+    pub fn status(_paths: &AppPaths) -> Result<LaunchAgentStatus> {
+        bail!("signalpane launch-agent is macOS only")
+    }
+
+    pub fn restart(_paths: &AppPaths) -> Result<LaunchAgentStatus> {
         bail!("signalpane launch-agent is macOS only")
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use crate::config::AppPaths;
 
@@ -448,6 +812,102 @@ mod tests {
 
         assert!(plist.contains("/tmp/signalpane &amp; &lt;bin&gt; &quot;quoted&quot;"));
         assert!(plist.contains("/tmp/state &amp; &lt;state&gt;/logs/daemon.log"));
+    }
+
+    #[test]
+    fn extracts_registered_binary_path_from_generated_plist() {
+        let paths = AppPaths::from_bases(
+            PathBuf::from("/tmp/cfg"),
+            PathBuf::from("/tmp/state & <state>"),
+        );
+        let plist = render_plist(Path::new("/tmp/signalpane & <bin> \"quoted\""), &paths);
+
+        assert_eq!(
+            registered_binary_path_from_plist(&plist).as_deref(),
+            Some("/tmp/signalpane & <bin> \"quoted\"")
+        );
+    }
+
+    #[test]
+    fn status_warns_when_registered_binary_differs_from_current_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::from_bases(dir.path().join("cfg"), dir.path().join("state"));
+        let plist_path = dir.path().join("com.faronan.signalpane.plist");
+        fs::write(
+            &plist_path,
+            render_plist(Path::new("/Users/alice/.local/bin/signalpane"), &paths),
+        )
+        .expect("write plist");
+
+        let status = build_status(
+            &paths,
+            plist_path,
+            true,
+            PathBuf::from("/tmp/debug/signalpane"),
+            DaemonIpcStatus::Unreachable,
+        );
+
+        assert_eq!(
+            status.binary_path,
+            PathBuf::from("/Users/alice/.local/bin/signalpane")
+        );
+        assert_eq!(status.warnings.len(), 1);
+        assert!(status.warnings[0].contains("registered binary differs"));
+    }
+
+    #[test]
+    fn status_warns_when_foreground_daemon_owns_socket_without_loaded_launch_agent() {
+        let paths = AppPaths::from_bases(PathBuf::from("/tmp/cfg"), PathBuf::from("/tmp/state"));
+
+        let status = build_status(
+            &paths,
+            PathBuf::from("/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist"),
+            false,
+            PathBuf::from("/Users/alice/.local/bin/signalpane"),
+            DaemonIpcStatus::Responsive,
+        );
+
+        assert_eq!(status.daemon_ipc, DaemonIpcStatus::Responsive);
+        assert_eq!(status.warnings.len(), 1);
+        assert!(status.warnings[0].contains("foreground daemon appears"));
+        assert!(
+            ensure_no_foreground_socket_conflict(
+                false,
+                DaemonIpcStatus::Responsive,
+                &paths.socket_file,
+            )
+            .is_err()
+        );
+        assert!(
+            ensure_no_foreground_socket_conflict(
+                true,
+                DaemonIpcStatus::Responsive,
+                &paths.socket_file
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn reads_tail_of_existing_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("daemon.log");
+        fs::write(&log_path, "one\ntwo\nthree\n").expect("write log");
+
+        let logs = read_log_tail(&log_path, 2).expect("logs");
+
+        assert!(logs.exists);
+        assert_eq!(logs.content, "two\nthree\n");
+    }
+
+    #[test]
+    fn missing_log_returns_empty_non_error_result() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let logs = read_log_tail(&dir.path().join("missing.log"), 100).expect("logs");
+
+        assert!(!logs.exists);
+        assert!(logs.content.is_empty());
     }
 
     #[test]
