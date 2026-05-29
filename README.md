@@ -18,6 +18,7 @@ signalpane config list
 signalpane daemon --foreground
 signalpane tui
 signalpane status
+signalpane doctor
 signalpane sources
 signalpane mark-read <id>
 signalpane launch-agent install
@@ -74,6 +75,13 @@ signalpane launch-agent status
 `signalpane launch-agent status` の `binary_path` が `~/.local/bin/signalpane` を指していれば、LaunchAgent も release install 先を使っています。
 
 更新時は、新しい release tag で download、checksum、extract、`install` を繰り返します。更新で置き換わるのは `~/.local/bin/signalpane` だけです。config、secret、database、socket、read state、log は変更されません。
+
+LaunchAgent を使っている場合は、binary 更新後に daemon を再起動して新しい binary を読み込ませます。
+
+```sh
+signalpane launch-agent restart
+signalpane doctor
+```
 
 ## Runtime locations
 
@@ -220,6 +228,39 @@ binary_path=/Users/alice/.local/bin/signalpane
 
 ## Diagnostics
 
+`signalpane doctor` は config、secret の presence、LaunchAgent、daemon IPC、runtime path、registered binary path と current binary path の差分を key=value で出します。token 実値は出しません。
+
+```text
+overall_status=warning
+config_path=/Users/alice/.config/signalpane/config.toml
+config_exists=true
+config_parse=ok
+github_enabled=true
+github_token_present=true
+github_status=ok
+slack_enabled=true
+slack_user_token_present=true
+slack_user_id_present=false
+slack_status=warning
+launch_agent_status=ok
+launch_agent_loaded=true
+daemon_ipc=responsive
+socket_path=/Users/alice/.local/state/signalpane/signalpane.sock
+socket_exists=true
+log_path=/Users/alice/.local/state/signalpane/logs/daemon.log
+log_exists=true
+db_path=/Users/alice/.local/state/signalpane/signalpane.sqlite3
+db_exists=true
+plist_path=/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist
+plist_exists=true
+registered_binary_path=/Users/alice/.local/bin/signalpane
+current_binary_path=/Users/alice/.local/bin/signalpane
+binary_path_match=true
+warning=slack is enabled but SIGNALPANE_SLACK_USER_ID is not present; runtime will resolve it with auth.test
+```
+
+`overall_status=warning` は exit code `0`、`overall_status=error` は診断結果を stdout に出した後で exit code `1` を返します。Slack の `SIGNALPANE_SLACK_USER_ID` 未設定は、live API call なしでは確定できないため warning に留めます。
+
 `signalpane status` の先頭行は安定しています。
 
 ```text
@@ -274,6 +315,6 @@ cargo clippy --all-targets -- -D warnings
 
 Release binary は Apple Silicon Mac 向けです。現時点では notarized macOS app bundle ではありません。
 
-GitHub Release を publish する前に、release workflow は macOS Apple Silicon runner で tarball smoke を実行します。artifact を展開し、binary が executable であること、`signalpane --help`、`signalpane --version`、isolated config/state での `signalpane launch-agent status` を確認します。
+GitHub Release を publish する前に、release workflow は macOS Apple Silicon runner で tarball smoke を実行します。`SHA256SUMS` を検証し、artifact を展開し、binary が executable であること、`signalpane --help`、`signalpane --version`、isolated config/state での `signalpane launch-agent status` を確認します。
 
 この smoke test は distribution binary の最小実行性だけを確認します。local install path、shell `PATH`、macOS quarantine、daemon IPC、live GitHub / Slack collectors、tokens、network access、Homebrew、self-update、SLSA、SBOM は保証しません。

@@ -1,10 +1,12 @@
+use std::io::Write;
+
 use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 
 use crate::{
     config::{AppPaths, Config, Secrets},
-    daemon,
+    daemon, doctor,
     ipc::IpcClient,
     launch_agent::{self, LaunchAgentStatus},
     tui,
@@ -33,6 +35,7 @@ enum Command {
     },
     Tui,
     Status,
+    Doctor,
     Sources,
     MarkRead {
         id: i64,
@@ -108,6 +111,17 @@ pub fn run() -> Result<()> {
                     format_optional_text(source.last_error.as_deref()),
                     source.consecutive_failures
                 );
+            }
+            Ok(())
+        }
+        Command::Doctor => {
+            let report = doctor::check(&paths);
+            let output = report.to_key_value();
+            let mut stdout = std::io::stdout();
+            stdout.write_all(output.as_bytes())?;
+            stdout.flush()?;
+            if report.has_errors() {
+                std::process::exit(1);
             }
             Ok(())
         }
@@ -251,6 +265,16 @@ mod tests {
             Command::LaunchAgent {
                 command: LaunchAgentCommand::Restart,
             } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_doctor_command() {
+        let cli = Cli::try_parse_from(["signalpane", "doctor"]).expect("parse cli");
+
+        match cli.command {
+            Command::Doctor => {}
             command => panic!("unexpected command: {command:?}"),
         }
     }
