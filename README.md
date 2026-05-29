@@ -5,9 +5,9 @@ Local developer notification hub for GitHub and Slack mentions.
 ## MVP commands
 
 ```sh
-signalpane daemon --foreground
 signalpane config init
 signalpane config list
+signalpane daemon --foreground
 signalpane tui
 signalpane status
 signalpane sources
