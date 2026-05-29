@@ -170,6 +170,20 @@ Config 変更は daemon 起動時に読み込まれます。`signalpane daemon -
 7. `signalpane sources`
 8. 必要なら `signalpane launch-agent logs --lines 100`
 
+## TUI
+
+`signalpane tui` は daemon に Unix socket で接続し、collector API には直接接続しません。画面は event list と selected event の detail pane に分かれ、detail pane には title、body、source、reason、actor、URL、occurred_at、read state を表示します。URL は表示だけで、browser 起動はしません。
+
+主な操作は次です。
+
+- `j` / `↓`: 次の event
+- `k` / `↑`: 前の event
+- `r`: 再読み込み
+- `m`: selected event を read にする
+- `u`: unread only / all を切り替え
+- `s`: all / source ごとの filter を切り替え
+- `q`: 終了
+
 LaunchAgent から daemon を起動する場合、secret は plist には書きません。起動前に user launchd environment へ渡します。
 
 ```sh
