@@ -15,6 +15,8 @@ signalpane mark-read <id>
 signalpane launch-agent install
 signalpane launch-agent uninstall
 signalpane launch-agent status
+signalpane launch-agent restart
+signalpane launch-agent logs --lines 100
 ```
 
 ## Install on Apple Silicon macOS
@@ -71,6 +73,8 @@ a macOS user LaunchAgent:
 ```sh
 signalpane launch-agent install
 signalpane launch-agent status
+signalpane launch-agent restart
+signalpane launch-agent logs --lines 100
 signalpane launch-agent uninstall
 ```
 
@@ -86,6 +90,35 @@ signalpane daemon --foreground
 The plist writes stdout and stderr to
 `~/.local/state/signalpane/logs/daemon.log`. Config, state, database, socket, and
 collector logs continue to use the runtime locations documented below.
+
+`signalpane launch-agent status` prints both launchd and daemon diagnostics:
+
+```text
+label=com.faronan.signalpane
+loaded=true
+daemon_ipc=responsive
+socket_path=/Users/alice/.local/state/signalpane/signalpane.sock
+log_path=/Users/alice/.local/state/signalpane/logs/daemon.log
+plist_path=/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist
+binary_path=/Users/alice/.local/bin/signalpane
+```
+
+`binary_path` is read from the installed plist when possible. If it differs from
+the currently running `signalpane` binary, status prints a `warning=` line. Run
+`signalpane launch-agent install` again to rewrite the plist with the current
+binary path.
+
+`signalpane launch-agent restart` uses the existing plist, runs `launchctl
+bootout` when loaded, then runs `launchctl bootstrap`. It does not rewrite the
+plist. `signalpane launch-agent logs` prints the daemon log path, whether the log
+exists, and the last 100 lines by default. Use `--lines <n>` to change the tail
+length.
+
+If `loaded=false` but `daemon_ipc=responsive`, a foreground
+`signalpane daemon --foreground` is already responding on the socket. Stop that
+foreground daemon before running `signalpane launch-agent install` or
+`signalpane launch-agent restart`; those commands abort when this conflict is
+detected.
 
 Secrets are not written to the plist. If the daemon needs GitHub or Slack
 credentials when launched by launchd, provide them through the user launchd

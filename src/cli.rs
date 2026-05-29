@@ -48,6 +48,11 @@ enum LaunchAgentCommand {
     Install,
     Uninstall,
     Status,
+    Restart,
+    Logs {
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -131,22 +136,60 @@ pub fn run() -> Result<()> {
             println!("changed={changed}");
             Ok(())
         }
-        Command::LaunchAgent { command } => {
-            let status = match command {
-                LaunchAgentCommand::Install => launch_agent::install(&paths)?,
-                LaunchAgentCommand::Uninstall => launch_agent::uninstall()?,
-                LaunchAgentCommand::Status => launch_agent::status()?,
-            };
-            print_launch_agent_status(&status);
-            Ok(())
-        }
+        Command::LaunchAgent { command } => match command {
+            LaunchAgentCommand::Install => {
+                print_launch_agent_status(&launch_agent::install(&paths)?);
+                Ok(())
+            }
+            LaunchAgentCommand::Uninstall => {
+                print_launch_agent_status(&launch_agent::uninstall(&paths)?);
+                Ok(())
+            }
+            LaunchAgentCommand::Status => {
+                print_launch_agent_status(&launch_agent::status(&paths)?);
+                Ok(())
+            }
+            LaunchAgentCommand::Restart => {
+                print_launch_agent_status(&launch_agent::restart(&paths)?);
+                Ok(())
+            }
+            LaunchAgentCommand::Logs { lines } => {
+                print_launch_agent_logs(&launch_agent::logs(&paths, lines)?);
+                Ok(())
+            }
+        },
     }
 }
 
 fn print_launch_agent_status(status: &LaunchAgentStatus) {
-    println!("label={}", status.label);
-    println!("plist={}", status.plist_path.display());
-    println!("loaded={}", status.loaded);
+    print!("{}", format_launch_agent_status(status));
+}
+
+fn format_launch_agent_status(status: &LaunchAgentStatus) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("label={}\n", status.label));
+    output.push_str(&format!("loaded={}\n", status.loaded));
+    output.push_str(&format!("daemon_ipc={}\n", status.daemon_ipc.as_str()));
+    output.push_str(&format!("socket_path={}\n", status.socket_path.display()));
+    output.push_str(&format!("log_path={}\n", status.log_path.display()));
+    output.push_str(&format!("plist_path={}\n", status.plist_path.display()));
+    output.push_str(&format!("binary_path={}\n", status.binary_path.display()));
+    for warning in &status.warnings {
+        output.push_str(&format!("warning={}\n", sanitize_cli_value(warning)));
+    }
+    output
+}
+
+fn print_launch_agent_logs(logs: &launch_agent::LaunchAgentLogs) {
+    print!("{}", format_launch_agent_logs(logs));
+}
+
+fn format_launch_agent_logs(logs: &launch_agent::LaunchAgentLogs) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("log_path={}\n", logs.log_path.display()));
+    output.push_str(&format!("log_exists={}\n", logs.exists));
+    output.push_str(&logs.content);
+    output
 }
 
 fn format_dt(value: Option<&DateTime<Utc>>) -> String {
@@ -197,5 +240,73 @@ mod tests {
             } => {}
             command => panic!("unexpected command: {command:?}"),
         }
+    }
+
+    #[test]
+    fn parses_launch_agent_restart_command() {
+        let cli =
+            Cli::try_parse_from(["signalpane", "launch-agent", "restart"]).expect("parse cli");
+
+        match cli.command {
+            Command::LaunchAgent {
+                command: LaunchAgentCommand::Restart,
+            } => {}
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_launch_agent_logs_lines_command() {
+        let cli = Cli::try_parse_from(["signalpane", "launch-agent", "logs", "--lines", "42"])
+            .expect("parse cli");
+
+        match cli.command {
+            Command::LaunchAgent {
+                command: LaunchAgentCommand::Logs { lines },
+            } => assert_eq!(lines, 42),
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn formats_launch_agent_status_diagnostics() {
+        let status = LaunchAgentStatus {
+            label: launch_agent::LABEL,
+            loaded: true,
+            daemon_ipc: launch_agent::DaemonIpcStatus::Responsive,
+            socket_path: "/tmp/state/signalpane.sock".into(),
+            log_path: "/tmp/state/logs/daemon.log".into(),
+            plist_path: "/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist".into(),
+            binary_path: "/Users/alice/.local/bin/signalpane".into(),
+            warnings: vec!["binary path differs\nfrom current executable".to_string()],
+        };
+
+        assert_eq!(
+            format_launch_agent_status(&status),
+            concat!(
+                "label=com.faronan.signalpane\n",
+                "loaded=true\n",
+                "daemon_ipc=responsive\n",
+                "socket_path=/tmp/state/signalpane.sock\n",
+                "log_path=/tmp/state/logs/daemon.log\n",
+                "plist_path=/Users/alice/Library/LaunchAgents/com.faronan.signalpane.plist\n",
+                "binary_path=/Users/alice/.local/bin/signalpane\n",
+                "warning=binary path differs from current executable\n",
+            )
+        );
+    }
+
+    #[test]
+    fn formats_missing_launch_agent_log_without_error() {
+        let logs = launch_agent::LaunchAgentLogs {
+            log_path: "/tmp/state/logs/daemon.log".into(),
+            exists: false,
+            content: String::new(),
+        };
+
+        assert_eq!(
+            format_launch_agent_logs(&logs),
+            "log_path=/tmp/state/logs/daemon.log\nlog_exists=false\n"
+        );
     }
 }

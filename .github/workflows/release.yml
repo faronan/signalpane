@@ -98,8 +98,12 @@ jobs:
           echo "${status_output}"
 
           grep -Fqx "label=com.faronan.signalpane" <<< "${status_output}"
-          grep -Fqx "plist=${smoke_home}/Library/LaunchAgents/com.faronan.signalpane.plist" <<< "${status_output}"
           grep -Eq '^loaded=(true|false)$' <<< "${status_output}"
+          grep -Eq '^daemon_ipc=(responsive|unreachable)$' <<< "${status_output}"
+          grep -Fqx "socket_path=${smoke_state}/signalpane/signalpane.sock" <<< "${status_output}"
+          grep -Fqx "log_path=${smoke_state}/signalpane/logs/daemon.log" <<< "${status_output}"
+          grep -Fqx "plist_path=${smoke_home}/Library/LaunchAgents/com.faronan.signalpane.plist" <<< "${status_output}"
+          grep -Fqx "binary_path=${binary}" <<< "${status_output}"
 
       - name: Create GitHub Release
         env:
