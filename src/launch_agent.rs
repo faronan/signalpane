@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env,
     path::{Path, PathBuf},
 };
 
@@ -167,7 +167,7 @@ fn build_status(
 
 #[cfg(any(target_os = "macos", test))]
 fn registered_binary_path_from_file(plist_path: &Path) -> Option<PathBuf> {
-    let plist = fs::read_to_string(plist_path).ok()?;
+    let plist = std::fs::read_to_string(plist_path).ok()?;
     registered_binary_path_from_plist(&plist).map(PathBuf::from)
 }
 
