@@ -9,7 +9,7 @@ use crate::{
     daemon, doctor,
     ipc::IpcClient,
     launch_agent::{self, LaunchAgentStatus},
-    tui,
+    logging, tui,
 };
 
 #[derive(Debug, Parser)]
@@ -43,6 +43,10 @@ enum Command {
     Sources,
     MarkRead {
         id: i64,
+    },
+    Log {
+        #[arg(long, default_value_t = logging::DEFAULT_LOG_LINES)]
+        lines: usize,
     },
     LaunchAgent {
         #[command(subcommand)]
@@ -205,6 +209,10 @@ pub fn run() -> Result<()> {
             println!("changed={changed}");
             Ok(())
         }
+        Command::Log { lines } => {
+            print_log_tail(&logging::read_log_tail(&paths.daemon_log, lines)?);
+            Ok(())
+        }
         Command::LaunchAgent { command } => match command {
             LaunchAgentCommand::Install => {
                 print_launch_agent_status(&launch_agent::install(&paths)?);
@@ -273,10 +281,14 @@ fn format_launch_agent_status(status: &LaunchAgentStatus) -> String {
 }
 
 fn print_launch_agent_logs(logs: &launch_agent::LaunchAgentLogs) {
-    print!("{}", format_launch_agent_logs(logs));
+    print!("{}", format_log_tail(logs));
 }
 
-fn format_launch_agent_logs(logs: &launch_agent::LaunchAgentLogs) -> String {
+fn print_log_tail(logs: &logging::LogTail) {
+    print!("{}", format_log_tail(logs));
+}
+
+fn format_log_tail(logs: &logging::LogTail) -> String {
     let mut output = String::new();
     output.push_str(&format!("log_path={}\n", logs.log_path.display()));
     output.push_str(&format!("log_exists={}\n", logs.exists));
@@ -457,6 +469,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_log_lines_command() {
+        let cli = Cli::try_parse_from(["signalpane", "log", "--lines", "42"]).expect("parse cli");
+
+        match cli.command {
+            Command::Log { lines } => assert_eq!(lines, 42),
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_log_default_lines_command() {
+        let cli = Cli::try_parse_from(["signalpane", "log"]).expect("parse cli");
+
+        match cli.command {
+            Command::Log { lines } => assert_eq!(lines, 100),
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
+
+    #[test]
     fn formats_launch_agent_status_diagnostics() {
         let status = LaunchAgentStatus {
             label: launch_agent::LABEL,
@@ -493,7 +525,7 @@ mod tests {
         };
 
         assert_eq!(
-            format_launch_agent_logs(&logs),
+            format_log_tail(&logs),
             "log_path=/tmp/state/logs/daemon.log\nlog_exists=false\n"
         );
     }

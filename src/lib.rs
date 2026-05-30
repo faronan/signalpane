@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod doctor;
 pub mod ipc;
 pub mod launch_agent;
+pub mod logging;
 pub mod model;
 pub mod store;
 pub mod tui;
