@@ -26,6 +26,7 @@ signalpane status
 signalpane doctor
 signalpane sources
 signalpane mark-read <id>
+signalpane log --lines 100
 signalpane launch-agent install
 signalpane launch-agent start
 signalpane launch-agent stop
@@ -96,6 +97,8 @@ signalpane doctor
 - State, database, socket: `~/.local/state/signalpane/`
 - Secrets: `~/.local/state/signalpane/secrets.env`
 - Logs: `~/.local/state/signalpane/logs/daemon.log`
+
+`signalpane log --lines 100` はこの `daemon.log` を読みます。foreground daemon と LaunchAgent は同じ log path を使います。
 
 Secrets は環境変数または `~/.local/state/signalpane/secrets.env` から読みます。優先順位は `environment variables > secrets.env > none` です。
 
@@ -209,7 +212,7 @@ launchctl setenv SIGNALPANE_SLACK_USER_ID "<slack-user-id>"
 6. `signalpane launch-agent install`
 7. `signalpane launch-agent status`
 8. `signalpane sources`
-9. 必要なら `signalpane launch-agent logs --lines 100`
+9. 必要なら `signalpane log --lines 100`
 
 ## TUI
 
@@ -235,6 +238,7 @@ signalpane launch-agent status
 signalpane launch-agent stop
 signalpane launch-agent start
 signalpane launch-agent restart
+signalpane log --lines 100
 signalpane launch-agent logs --lines 100
 signalpane launch-agent uninstall
 ```
@@ -245,7 +249,7 @@ LaunchAgent は `~/Library/LaunchAgents/com.faronan.signalpane.plist` だけを�
 signalpane daemon --foreground
 ```
 
-stdout/stderr は `~/.local/state/signalpane/logs/daemon.log` に出ます。config、state、database、socket、collector log は runtime locations に従います。
+stdout/stderr は `~/.local/state/signalpane/logs/daemon.log` に出ます。config、state、database、socket、collector log は runtime locations に従います。`signalpane log --lines N` と `signalpane launch-agent logs --lines N` は同じ log を読みます。
 
 `signalpane launch-agent status` は launchd と daemon IPC の状態を出します。
 
@@ -270,6 +274,8 @@ binary_path=/Users/alice/.local/bin/signalpane
 `binary_path` は plist に登録された binary path から読みます。現在実行している `signalpane` と違う場合は `warning=` が出ます。`signalpane launch-agent install` を再実行すると、現在の binary path で plist を書き直します。
 
 普段使いでは、LaunchAgent はログイン時に自動起動します。通常は `signalpane status`、`signalpane tui`、`signalpane sources` を見るだけです。
+
+daemon は起動時に `daemon.log` が大きすぎる場合、同じ file の末尾だけを残して size cap します。active log を rename rotate しないため、LaunchAgent の stdout/stderr file descriptor とは衝突しません。SIGINT/SIGTERM を受けた場合は IPC loop と collector loop を止め、Unix socket を best-effort で cleanup します。SIGKILL や強制終了で socket が残った場合も、次回起動時に stale socket と live daemon socket を判定します。
 
 `signalpane launch-agent start` は既存 plist を使って bootstrap します。plist がない場合は `signalpane launch-agent install` を案内して error になります。plist は書き換えません。
 
@@ -333,18 +339,20 @@ unread=0 total=0
 
 collector error は SQLite cursor metadata と `~/.local/state/signalpane/logs/daemon.log` に記録します。GitHub や Slack の一部 channel が失敗しても、他 collector は止めません。
 
+daemon lifecycle と collector error は daemon log に記録します。token 実値は log と cursor error metadata に出さないよう redaction します。
+
 API request timeout は 10 秒固定です。成功時は API 側の retry hint を優先します。GitHub は `X-Poll-Interval`、Slack は `Retry-After` を見ます。hint がなければ config の `poll_interval_seconds` を使います。失敗時は 60 秒から始まり最大 15 分まで exponential backoff します。
 
 ## よくある失敗
 
-| 症状                                        | 見る場所                                                                                                                                             | 対処                                                                                                                       |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `daemon_ipc=unreachable`                    | `signalpane launch-agent status`, `signalpane status`, `signalpane launch-agent logs --lines 100`, `launchctl print gui/$UID/com.faronan.signalpane` | 起動直後なら少し待つ。log の collector error と plist の `binary_path` を確認する。                                        |
-| GitHub `401 Unauthorized`                   | `signalpane secrets check`, `signalpane sources`, daemon log                                                                                         | `SIGNALPANE_GITHUB_TOKEN` が present か、classic PAT かどうか、`notifications` または `repo` scope を確認する。            |
-| Slack `missing_scope`                       | `signalpane sources`, daemon log                                                                                                                     | conversation 種別に応じて `channels:history` / `groups:history` / `im:history` / `mpim:history` を user token に追加する。 |
-| Slack `channel_not_found`                   | `signalpane sources`, daemon log                                                                                                                     | `config.toml` が channel name ではなく ID を使っているか、ID の workspace が token と一致しているか確認する。              |
-| Slack `not_in_channel`                      | `signalpane sources`, daemon log                                                                                                                     | user token の user が対象 private channel / DM / group DM を読めるか、所属・可視性・scope を確認する。                     |
-| `loaded=false` かつ `daemon_ipc=responsive` | `signalpane launch-agent status`                                                                                                                     | foreground daemon が socket を掴んでいる。foreground daemon を止めてから LaunchAgent を install/start/restart する。       |
+| 症状                                        | 見る場所                                                                                                                               | 対処                                                                                                                       |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `daemon_ipc=unreachable`                    | `signalpane launch-agent status`, `signalpane status`, `signalpane log --lines 100`, `launchctl print gui/$UID/com.faronan.signalpane` | 起動直後なら少し待つ。log の collector error と plist の `binary_path` を確認する。                                        |
+| GitHub `401 Unauthorized`                   | `signalpane secrets check`, `signalpane sources`, daemon log                                                                           | `SIGNALPANE_GITHUB_TOKEN` が present か、classic PAT かどうか、`notifications` または `repo` scope を確認する。            |
+| Slack `missing_scope`                       | `signalpane sources`, daemon log                                                                                                       | conversation 種別に応じて `channels:history` / `groups:history` / `im:history` / `mpim:history` を user token に追加する。 |
+| Slack `channel_not_found`                   | `signalpane sources`, daemon log                                                                                                       | `config.toml` が channel name ではなく ID を使っているか、ID の workspace が token と一致しているか確認する。              |
+| Slack `not_in_channel`                      | `signalpane sources`, daemon log                                                                                                       | user token の user が対象 private channel / DM / group DM を読めるか、所属・可視性・scope を確認する。                     |
+| `loaded=false` かつ `daemon_ipc=responsive` | `signalpane launch-agent status`                                                                                                       | foreground daemon が socket を掴んでいる。foreground daemon を止めてから LaunchAgent を install/start/restart する。       |
 
 ## セキュリティ注意
 
