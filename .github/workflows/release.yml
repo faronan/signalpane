@@ -33,6 +33,17 @@ jobs:
           echo "VERSION=${tag#v}" >> "${GITHUB_ENV}"
           echo "ASSET_BASE=signalpane-${tag}-${TARGET}" >> "${GITHUB_ENV}"
 
+      - name: Validate manifest version
+        run: |
+          set -euo pipefail
+
+          package_id="$(cargo pkgid)"
+          manifest_version="${package_id##*#}"
+          if [[ "${manifest_version}" != "${VERSION}" ]]; then
+            echo "::error::release tag ${GITHUB_REF_NAME} requires Cargo.toml version ${VERSION}, got ${manifest_version}"
+            exit 1
+          fi
+
       - name: Install Rust components
         run: |
           rustup component add rustfmt clippy
