@@ -1,9 +1,13 @@
 use std::{
-    fs::{self, OpenOptions},
+    fs,
     io::{BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    thread,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -15,6 +19,7 @@ use crate::{
     collectors::{github::GithubCollector, slack::SlackCollector},
     config::{AppPaths, Config, Secrets},
     ipc::{IpcRequest, handle_request},
+    logging::{self, LogCapOutcome, MAX_DAEMON_LOG_BYTES, RETAIN_DAEMON_LOG_BYTES, SecretRedactor},
     store::Store,
 };
 
@@ -24,17 +29,38 @@ const FAILURE_BACKOFF_MAX_SECONDS: i64 = 15 * 60;
 
 pub fn run_foreground(paths: AppPaths, config: Config, secrets: Secrets) -> Result<()> {
     paths.ensure_dirs()?;
+    let redactor = SecretRedactor::from_secrets(&secrets);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    install_shutdown_signal_handlers(&shutdown)?;
+
     let store = Store::open(&paths.db_file)?;
     bootstrap_accounts(&store, &config, &secrets)?;
     drop(store);
 
-    spawn_collector_loop(
+    let (listener, socket_guard) = bind_ipc_listener(&paths.socket_file)?;
+    cap_startup_log(&paths.daemon_log, &redactor)?;
+    logging::append_log(&paths.daemon_log, "daemon started", &redactor)?;
+
+    let collector = spawn_collector_loop(
         paths.db_file.clone(),
         paths.daemon_log.clone(),
         config,
         secrets,
+        Arc::clone(&shutdown),
+        redactor.clone(),
     );
-    run_ipc_server(&paths.socket_file, &paths.db_file)
+    let ipc_result = run_ipc_server(
+        listener,
+        socket_guard,
+        paths.db_file.clone(),
+        Arc::clone(&shutdown),
+        paths.daemon_log.clone(),
+        redactor.clone(),
+    );
+    shutdown.store(true, Ordering::SeqCst);
+    join_collector_loop(collector, &paths.daemon_log, &redactor);
+    let _ = logging::append_log(&paths.daemon_log, "daemon stopped", &redactor);
+    ipc_result
 }
 
 fn bootstrap_accounts(store: &Store, config: &Config, secrets: &Secrets) -> Result<()> {
@@ -55,21 +81,88 @@ fn bootstrap_accounts(store: &Store, config: &Config, secrets: &Secrets) -> Resu
     Ok(())
 }
 
-fn spawn_collector_loop(db_path: PathBuf, log_path: PathBuf, config: Config, secrets: Secrets) {
-    thread::spawn(move || {
-        loop {
-            if let Err(err) = collect_once(&db_path, &log_path, &config, &secrets) {
-                let _ = append_log(&log_path, &format!("collector error: {err:#}"));
-            }
-            thread::sleep(Duration::from_secs(COLLECTOR_LOOP_SECONDS));
-        }
-    });
+fn install_shutdown_signal_handlers(shutdown: &Arc<AtomicBool>) -> Result<()> {
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(shutdown))
+        .context("failed to register SIGINT handler")?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(shutdown))
+        .context("failed to register SIGTERM handler")?;
+    Ok(())
 }
 
-fn collect_once(db_path: &Path, log_path: &Path, config: &Config, secrets: &Secrets) -> Result<()> {
+fn cap_startup_log(log_path: &Path, redactor: &SecretRedactor) -> Result<()> {
+    match logging::cap_log_size(
+        log_path,
+        MAX_DAEMON_LOG_BYTES,
+        RETAIN_DAEMON_LOG_BYTES,
+        redactor,
+    )? {
+        LogCapOutcome::Capped {
+            original_bytes,
+            retained_bytes,
+        } => logging::append_log(
+            log_path,
+            &format!(
+                "daemon log capped original_bytes={original_bytes} retained_bytes={retained_bytes}"
+            ),
+            redactor,
+        ),
+        LogCapOutcome::Missing | LogCapOutcome::Unchanged { .. } => Ok(()),
+    }
+}
+
+fn spawn_collector_loop(
+    db_path: PathBuf,
+    log_path: PathBuf,
+    config: Config,
+    secrets: Secrets,
+    shutdown: Arc<AtomicBool>,
+    redactor: SecretRedactor,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        while !shutdown.load(Ordering::SeqCst) {
+            if let Err(err) = collect_once(&db_path, &log_path, &config, &secrets, &redactor) {
+                let _ =
+                    logging::append_log(&log_path, &format!("collector error: {err:#}"), &redactor);
+            }
+            sleep_until_shutdown(
+                &shutdown,
+                Duration::from_secs(COLLECTOR_LOOP_SECONDS),
+                Duration::from_millis(200),
+            );
+        }
+    })
+}
+
+fn join_collector_loop(collector: JoinHandle<()>, log_path: &Path, redactor: &SecretRedactor) {
+    if collector.join().is_err() {
+        let _ = logging::append_log(
+            log_path,
+            "collector thread panicked during shutdown",
+            redactor,
+        );
+    }
+}
+
+fn sleep_until_shutdown(shutdown: &AtomicBool, duration: Duration, step: Duration) {
+    let mut slept = Duration::ZERO;
+    while slept < duration && !shutdown.load(Ordering::SeqCst) {
+        let remaining = duration.saturating_sub(slept);
+        let sleep_for = remaining.min(step);
+        thread::sleep(sleep_for);
+        slept += sleep_for;
+    }
+}
+
+fn collect_once(
+    db_path: &Path,
+    log_path: &Path,
+    config: &Config,
+    secrets: &Secrets,
+    redactor: &SecretRedactor,
+) -> Result<()> {
     let store = Store::open(db_path)?;
-    collect_github(&store, log_path, config, secrets)?;
-    collect_slack(&store, log_path, config, secrets)?;
+    collect_github(&store, log_path, config, secrets, redactor)?;
+    collect_slack(&store, log_path, config, secrets, redactor)?;
     Ok(())
 }
 
@@ -78,6 +171,7 @@ fn collect_github(
     log_path: &Path,
     config: &Config,
     secrets: &Secrets,
+    redactor: &SecretRedactor,
 ) -> Result<()> {
     if config.github.enabled
         && let Some(token) = &secrets.github_token
@@ -109,6 +203,7 @@ fn collect_github(
                     "notifications",
                     &serde_json::json!({}),
                     &err,
+                    redactor,
                 )?;
             }
         }
@@ -116,7 +211,13 @@ fn collect_github(
     Ok(())
 }
 
-fn collect_slack(store: &Store, log_path: &Path, config: &Config, secrets: &Secrets) -> Result<()> {
+fn collect_slack(
+    store: &Store,
+    log_path: &Path,
+    config: &Config,
+    secrets: &Secrets,
+    redactor: &SecretRedactor,
+) -> Result<()> {
     if config.slack.enabled
         && let Some(token) = &secrets.slack_user_token
         && !config.slack.channels.is_empty()
@@ -152,7 +253,15 @@ fn collect_slack(store: &Store, log_path: &Path, config: &Config, secrets: &Secr
                 )
             })();
             if let Err(err) = result {
-                record_collector_failure(store, log_path, "slack", &cursor_key, &metadata, &err)?;
+                record_collector_failure(
+                    store,
+                    log_path,
+                    "slack",
+                    &cursor_key,
+                    &metadata,
+                    &err,
+                    redactor,
+                )?;
             }
         }
     }
@@ -191,6 +300,7 @@ fn record_collector_failure(
     cursor_key: &str,
     metadata: &serde_json::Value,
     err: &anyhow::Error,
+    redactor: &SecretRedactor,
 ) -> Result<()> {
     let consecutive_failures = store
         .get_cursor_state(source, cursor_key)?
@@ -198,7 +308,7 @@ fn record_collector_failure(
         .unwrap_or(1)
         .max(1);
     let poll_after = Some(Utc::now() + failure_backoff_duration(consecutive_failures));
-    let error = compact_error_message(&format!("{err:#}"));
+    let error = redactor.redact(&compact_error_message(&format!("{err:#}")));
     let store_result = store.record_cursor_failure(
         source,
         cursor_key,
@@ -207,9 +317,10 @@ fn record_collector_failure(
         poll_after,
         metadata,
     );
-    let log_result = append_log(
+    let log_result = logging::append_log(
         log_path,
         &format!("{source}/{cursor_key} collector error failures={consecutive_failures}: {error}"),
+        redactor,
     );
     store_result?;
     log_result
@@ -238,22 +349,66 @@ fn compact_error_message(message: &str) -> String {
     truncated
 }
 
-fn run_ipc_server(socket_path: &Path, db_path: &Path) -> Result<()> {
+fn bind_ipc_listener(socket_path: &Path) -> Result<(UnixListener, SocketGuard)> {
     prepare_socket_path(socket_path)?;
     let listener = UnixListener::bind(socket_path)
         .with_context(|| format!("failed to bind {}", socket_path.display()))?;
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    listener
+        .set_nonblocking(true)
+        .context("failed to configure IPC listener as nonblocking")?;
+    Ok((listener, SocketGuard::new(socket_path.to_path_buf())))
+}
+
+fn run_ipc_server(
+    listener: UnixListener,
+    _socket_guard: SocketGuard,
+    db_path: PathBuf,
+    shutdown: Arc<AtomicBool>,
+    log_path: PathBuf,
+    redactor: SecretRedactor,
+) -> Result<()> {
+    while !shutdown.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
                 let db_path = db_path.to_path_buf();
                 thread::spawn(move || {
                     let _ = handle_stream(stream, &db_path);
                 });
             }
-            Err(err) => eprintln!("signalpane ipc accept error: {err}"),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                logging::append_log(
+                    &log_path,
+                    &format!("signalpane ipc accept error: {err}"),
+                    &redactor,
+                )?;
+            }
         }
     }
     Ok(())
+}
+
+struct SocketGuard {
+    path: PathBuf,
+}
+
+impl SocketGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        match fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {}
+        }
+    }
 }
 
 fn prepare_socket_path(socket_path: &Path) -> Result<()> {
@@ -283,15 +438,6 @@ fn handle_stream(mut stream: UnixStream, db_path: &Path) -> Result<()> {
     stream.write_all(payload.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
-    Ok(())
-}
-
-fn append_log(path: &Path, message: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{} {message}", Utc::now().to_rfc3339())?;
     Ok(())
 }
 
@@ -325,6 +471,79 @@ mod tests {
             err.to_string().contains("already running"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn socket_guard_removes_bound_socket_on_drop() {
+        let dir = tempdir().expect("tempdir");
+        let socket_path = dir.path().join("signalpane.sock");
+
+        let (_listener, guard) = bind_ipc_listener(&socket_path).expect("bind ipc listener");
+        assert!(socket_path.exists());
+        drop(guard);
+
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn ipc_server_exits_on_shutdown_and_cleans_socket() {
+        let dir = tempdir().expect("tempdir");
+        let db_path = dir.path().join("signalpane.sqlite3");
+        Store::open(&db_path).expect("store");
+        let socket_path = dir.path().join("signalpane.sock");
+        let log_path = dir.path().join("daemon.log");
+        let (listener, guard) = bind_ipc_listener(&socket_path).expect("bind ipc listener");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = Arc::clone(&shutdown);
+
+        let handle = thread::spawn(move || {
+            run_ipc_server(
+                listener,
+                guard,
+                db_path,
+                server_shutdown,
+                log_path,
+                SecretRedactor::default(),
+            )
+            .expect("ipc server");
+        });
+        thread::sleep(Duration::from_millis(100));
+        shutdown.store(true, Ordering::SeqCst);
+
+        handle.join().expect("join server");
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn collector_failure_redacts_secret_in_cursor_metadata_and_log() {
+        let dir = tempdir().expect("tempdir");
+        let log_path = dir.path().join("daemon.log");
+        let store = Store::open_in_memory().expect("store");
+        let redactor = SecretRedactor::from_values(["ghp_secret"]);
+
+        record_collector_failure(
+            &store,
+            &log_path,
+            "github",
+            "notifications",
+            &serde_json::json!({}),
+            &anyhow::anyhow!("request failed with ghp_secret"),
+            &redactor,
+        )
+        .expect("record failure");
+
+        let cursor = store
+            .get_cursor_state("github", "notifications")
+            .expect("cursor query")
+            .expect("cursor");
+        let log = fs::read_to_string(&log_path).expect("read log");
+
+        assert_eq!(
+            cursor.last_error.as_deref(),
+            Some("request failed with [REDACTED]")
+        );
+        assert!(log.contains("request failed with [REDACTED]"));
+        assert!(!log.contains("ghp_secret"));
     }
 
     #[test]

@@ -1,14 +1,13 @@
 use std::{
     env, fs,
-    io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 
-use crate::config::AppPaths;
 #[cfg(target_os = "macos")]
 use crate::ipc::IpcClient;
+use crate::{config::AppPaths, logging};
 
 pub const LABEL: &str = "com.faronan.signalpane";
 const PLIST_FILE_NAME: &str = "com.faronan.signalpane.plist";
@@ -40,12 +39,7 @@ impl DaemonIpcStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaunchAgentLogs {
-    pub log_path: PathBuf,
-    pub exists: bool,
-    pub content: String,
-}
+pub type LaunchAgentLogs = logging::LogTail;
 
 pub fn install(paths: &AppPaths) -> Result<LaunchAgentStatus> {
     platform::install(paths)
@@ -72,7 +66,7 @@ pub fn restart(paths: &AppPaths) -> Result<LaunchAgentStatus> {
 }
 
 pub fn logs(paths: &AppPaths, lines: usize) -> Result<LaunchAgentLogs> {
-    read_log_tail(&paths.daemon_log, lines)
+    logging::read_log_tail(&paths.daemon_log, lines)
 }
 
 pub fn launch_agent_path_from_home(home: &Path) -> PathBuf {
@@ -132,44 +126,6 @@ fn escape_plist_string(value: &str) -> String {
         }
     }
     escaped
-}
-
-fn read_log_tail(log_path: &Path, lines: usize) -> Result<LaunchAgentLogs> {
-    let file = match fs::File::open(log_path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(LaunchAgentLogs {
-                log_path: log_path.to_path_buf(),
-                exists: false,
-                content: String::new(),
-            });
-        }
-        Err(err) => {
-            return Err(err).with_context(|| format!("failed to read {}", log_path.display()));
-        }
-    };
-
-    let mut tail = std::collections::VecDeque::new();
-    for line in BufReader::new(file).lines() {
-        if lines == 0 {
-            break;
-        }
-        if tail.len() == lines {
-            tail.pop_front();
-        }
-        tail.push_back(line?);
-    }
-
-    let mut content = tail.into_iter().collect::<Vec<_>>().join("\n");
-    if !content.is_empty() {
-        content.push('\n');
-    }
-
-    Ok(LaunchAgentLogs {
-        log_path: log_path.to_path_buf(),
-        exists: true,
-        content,
-    })
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1175,7 +1131,7 @@ mod tests {
         let log_path = dir.path().join("daemon.log");
         fs::write(&log_path, "one\ntwo\nthree\n").expect("write log");
 
-        let logs = read_log_tail(&log_path, 2).expect("logs");
+        let logs = logging::read_log_tail(&log_path, 2).expect("logs");
 
         assert!(logs.exists);
         assert_eq!(logs.content, "two\nthree\n");
@@ -1185,7 +1141,7 @@ mod tests {
     fn missing_log_returns_empty_non_error_result() {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let logs = read_log_tail(&dir.path().join("missing.log"), 100).expect("logs");
+        let logs = logging::read_log_tail(&dir.path().join("missing.log"), 100).expect("logs");
 
         assert!(!logs.exists);
         assert!(logs.content.is_empty());
